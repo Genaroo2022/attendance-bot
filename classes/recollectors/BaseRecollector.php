@@ -30,12 +30,24 @@ abstract class BaseRecollector {
     public function processRecordings($meetingIds = []) {
         throw new \Exception(get_class($this) . ' does not implement processRecordings()');
     }
-    
+
+    /**
+     * Get meetings by recollector-specific instance ID
+     * Implemented by: ZoomRecollectorData (uses Zoom instance ID)
+     * Not needed by: ZoomRecollectorBackup
+     *
+     * @param int $recollectorId The recollector-specific instance ID (e.g., Zoom ID)
+     * @return array Array of meeting objects
+     */
+    public function getMeetingsByRecollectorId($recollectorId) {
+        throw new \Exception(get_class($this) . ' does not implement getMeetingsByRecollectorId()');
+    }
+
     /**
      * Get name of recollector
      */
     abstract public static function getName();
-    
+
     /**
      * Get type identifier
      */

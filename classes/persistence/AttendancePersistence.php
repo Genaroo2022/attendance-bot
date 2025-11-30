@@ -577,22 +577,23 @@ class AttendancePersistence extends BasePersistence {
             return $statuses['absent'];
         }
 
-        if (!isset($participant->duration)) {
-            mtrace("      Warning: Participant has no duration property, marking as absent");
+        $participantDuration = $participant->getDuration();
+        if (empty($participantDuration)) {
+            mtrace("      Warning: Participant has no duration, marking as absent");
             return $statuses['absent'];
         }
 
         // Check attendance percentage
         // Note: participant->duration is in MINUTES, $duration is in SECONDS
-        $attendedSeconds = $participant->duration * 60; // Convert minutes to seconds
+        $attendedSeconds = $participantDuration * 60; // Convert minutes to seconds
         $attendancePercent = ($attendedSeconds / $duration) * 100;
 
         if ($attendancePercent < $config->min_percentage) {
             return $statuses['absent'];
         }
 
-        // Check camera requirement (with safe property access)
-        $hasVideo = isset($participant->hasVideo) ? $participant->hasVideo : false;
+        // Check camera requirement
+        $hasVideo = $participant->getHasVideo();
         if ($config->camera_required && !$hasVideo) {
             return $statuses['absent'];
         }

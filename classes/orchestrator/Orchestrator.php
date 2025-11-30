@@ -206,7 +206,7 @@ class Orchestrator {
 
                 foreach ($zoomIds as $zoomId) {
                     try {
-                        $meetings = $this->recollector->getMeetingsByZoomId($zoomId);
+                        $meetings = $this->recollector->getMeetingsByRecollectorId($zoomId);
 
                         if (empty($meetings)) {
                             mtrace("  No meetings found for Zoom ID: {$zoomId}");

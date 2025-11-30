@@ -43,15 +43,23 @@ class StudentAttendance {
         return $this->joinTime;
     }
 
+    public function getLeaveTime() {
+        return $this->leaveTime;
+    }
+
+    public function getDuration() {
+        return $this->duration;
+    }
+
+    public function getHasVideo() {
+        return $this->hasVideo;
+    }
+
     public function getGroupId() {
         return $this->groupId;
     }
 
     public function getName() {
         return $this->name;
-    }
-
-    public function getLeaveTime() {
-        return $this->leaveTime;
     }
 }

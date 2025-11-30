@@ -52,7 +52,11 @@ class ZoomRecollectorData extends BaseRecollector {
 
         // Determine next day to process
         if ($config->last_processed_date === null) {
-            $targetDate = $config->start_date; // First run: start from beginning
+            // First run: start from beginning
+            if (empty($config->start_date)) {
+                throw new \Exception("Configuration start_date is not set for course {$this->courseId}");
+            }
+            $targetDate = $config->start_date;
         } else {
             $targetDate = $config->last_processed_date + 86400; // Next day (86400 = 24 hours)
         }
@@ -196,13 +200,18 @@ class ZoomRecollectorData extends BaseRecollector {
             $teachers = [];
             
             foreach ($attendanceData as $participant) {
-                mtrace("    Processing participant: name='{$participant->name}', email='{$participant->user_email}', userid={$participant->userid}");
-                
+                // Defensive checks for participant object properties
+                $name = $participant->name ?? 'Unknown';
+                $email = $participant->user_email ?? 'no-email';
+                $userid = $participant->userid ?? 0;
+
+                mtrace("    Processing participant: name='{$name}', email='{$email}', userid={$userid}");
+
                 // Validate user by name (case-insensitive)
-                $userId = $this->validateUserByName($participant->name, $participant->userid);
+                $userId = $this->validateUserByName($name, $userid);
                 
                 if (!$userId) {
-                    mtrace("      Warning: Could not match user with name '{$participant->name}'");
+                    mtrace("      Warning: Could not match user with name '{$name}'");
                     continue;
                 }
                 
@@ -242,42 +251,42 @@ class ZoomRecollectorData extends BaseRecollector {
         
         // Try exact firstname match
         $user = $DB->get_record('user', ['firstname' => $zoomName, 'deleted' => 0]);
-        if ($user) {
+        if ($user && !empty($user->id)) {
             return $user->id;
         }
         
         // Try case-insensitive firstname match
-        $sql = "SELECT id FROM {user} 
-                WHERE LOWER(firstname) = LOWER(:name) 
-                AND deleted = 0 
+        $sql = "SELECT id FROM {user}
+                WHERE LOWER(firstname) = LOWER(:name)
+                AND deleted = 0
                 LIMIT 1";
         $user = $DB->get_record_sql($sql, ['name' => $zoomName]);
-        if ($user) {
+        if ($user && !empty($user->id)) {
             return $user->id;
         }
         
         // Try case-insensitive lastname match
-        $sql = "SELECT id FROM {user} 
-                WHERE LOWER(lastname) = LOWER(:name) 
-                AND deleted = 0 
+        $sql = "SELECT id FROM {user}
+                WHERE LOWER(lastname) = LOWER(:name)
+                AND deleted = 0
                 LIMIT 1";
         $user = $DB->get_record_sql($sql, ['name' => $zoomName]);
-        if ($user) {
+        if ($user && !empty($user->id)) {
             return $user->id;
         }
         
         // Try full name match (firstname lastname)
         if (strpos($zoomName, ' ') !== false) {
             list($firstName, $lastName) = explode(' ', $zoomName, 2);
-            $sql = "SELECT id FROM {user} 
-                    WHERE LOWER(firstname) = LOWER(:firstname) 
-                    AND LOWER(lastname) = LOWER(:lastname) 
-                    AND deleted = 0 
+            $sql = "SELECT id FROM {user}
+                    WHERE LOWER(firstname) = LOWER(:firstname)
+                    AND LOWER(lastname) = LOWER(:lastname)
+                    AND deleted = 0
                     LIMIT 1";
-            $user = $DB->get_record_sql($sql, 
+            $user = $DB->get_record_sql($sql,
                 ['firstname' => $firstName, 'lastname' => $lastName]
             );
-            if ($user) {
+            if ($user && !empty($user->id)) {
                 return $user->id;
             }
         }
@@ -286,10 +295,10 @@ class ZoomRecollectorData extends BaseRecollector {
         return $fallbackUserId;
     }
 
-    public function getMeetingsByZoomId($zoomId): array {
+    public function getMeetingsByRecollectorId($recollectorId): array {
         global $DB;
 
-        mtrace("    Querying meetings for zoomid: {$zoomId}");
+        mtrace("    Querying meetings for zoomid: {$recollectorId}");
 
         try {
             // Get bot configuration for date and time range
@@ -318,14 +327,14 @@ class ZoomRecollectorData extends BaseRecollector {
                     AND participants_count > 1";
 
             $results = $DB->get_records_sql($sql, [
-                'zoomid' => $zoomId,
+                'zoomid' => $recollectorId,
                 'start_date' => $startDate,
                 'end_date' => $endDate
             ]);
 
             // Ensure we always return an array (DB can return null/false on error)
             if (!is_array($results)) {
-                mtrace("    Warning: Query returned non-array result for zoomid {$zoomId}");
+                mtrace("    Warning: Query returned non-array result for zoomid {$recollectorId}");
                 return [];
             }
 
