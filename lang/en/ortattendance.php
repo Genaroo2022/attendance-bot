@@ -45,8 +45,6 @@ $string['localdirectory'] = 'Local directory';
 $string['localdirectory_desc'] = 'Local path for storing recordings';
 $string['backuplimit'] = 'Backup download limit';
 $string['backuplimit_desc'] = 'Maximum number of recordings to download per scheduled task run';
-$string['maxfilesize'] = 'Maximum file size';
-$string['maxfilesize_desc'] = 'Maximum file size for backup in MB (recordings larger than this will be skipped)';
 
 // Zoom configuration
 $string['zoomconfig'] = 'Zoom Configuration';
@@ -105,8 +103,14 @@ $string['localdirectory_desc'] = 'Directory path where recordings will be stored
 $string['backuplimit'] = 'Backup Limit';
 $string['backuplimit_desc'] = 'Maximum number of recordings to backup per scheduled task run';
 
-$string['maxfilesize'] = 'Maximum File Size';
-$string['maxfilesize_desc'] = 'Maximum file size in MB for recording backups';
-
 $string['keeplocalafterupload'] = 'keep local files after Moodle upload';
 $string['keeplocalafterupload_desc'] = 'keep recording files from local filesystem after successful upload to Moodle';
+
+$string['chunkingsettings'] = 'Chunking settings';
+$string['chunkingsettings_desc'] = 'Configuration options for splitting attendance processing into smaller chunks to avoid timeouts.';
+
+$string['maxdaysperrun'] = 'Maximum days per run';
+$string['maxdaysperrun_desc'] = 'Maximum number of days of attendance data to process per execution. Lower values reduce the risk of timeouts.';
+
+$string['maxexecutiontime'] = 'Maximum execution time (minutes)';
+$string['maxexecutiontime_desc'] = 'Maximum amount of time (in minutes) the attendance processing task is allowed to run before stopping. Default is 50 minutes.';

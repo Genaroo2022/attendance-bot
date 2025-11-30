@@ -39,8 +39,8 @@ class mod_ortattendance_mod_form extends moodleform_mod {
         
         $mform->addElement('header', 'datetime', get_string('datetimerange', 'mod_ortattendance'));
 
-        $mform->setDefault('start_date', strtotime('-7 days'));
-        $mform->setDefault('end_date', strtotime('+7 days'));
+        $mform->setDefault('start_date', strtotime(date('Y') . '-03-05'));
+        $mform->setDefault('end_date', strtotime(date('Y') . '-12-22'));
 
         $mform->addElement('date_selector', 'start_date', get_string('startdate', 'mod_ortattendance'));
         $mform->addElement('date_selector', 'end_date', get_string('enddate', 'mod_ortattendance'));

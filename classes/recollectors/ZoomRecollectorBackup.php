@@ -84,19 +84,25 @@ class ZoomRecollectorBackup extends BaseRecollector {
      */
     private function getMeetingDetails($meetingId): object|false {
         global $DB;
-        $sql = "SELECT * FROM {zoom_meeting_details} WHERE meeting_id = :meetingid LIMIT 1";
-        $meeting = $DB->get_record_sql($sql, ['meetingid' => $meetingId]);
-        
-        if ($meeting) {
-            // Create object with name property for compatibility
-            $details = new \stdClass();
-            $details->name = $meeting->topic;
-            $details->start_time = $meeting->start_time;
-            $details->meeting_id = $meeting->meeting_id;
-            return $details;
+
+        try {
+            $sql = "SELECT * FROM {zoom_meeting_details} WHERE meeting_id = :meetingid LIMIT 1";
+            $meeting = $DB->get_record_sql($sql, ['meetingid' => $meetingId]);
+
+            if ($meeting) {
+                // Create object with name property for compatibility
+                $details = new \stdClass();
+                $details->name = $meeting->topic ?? 'Unknown Meeting';
+                $details->start_time = $meeting->start_time ?? time();
+                $details->meeting_id = $meeting->meeting_id;
+                return $details;
+            }
+
+            return false;
+        } catch (\Exception $e) {
+            mtrace("  Error fetching meeting details for {$meetingId}: " . $e->getMessage());
+            return false;
         }
-        
-        return false;
     }
 
     /**

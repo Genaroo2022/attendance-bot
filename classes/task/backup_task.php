@@ -2,12 +2,14 @@
 namespace mod_ortattendance\task;
 
 use mod_ortattendance\services\BackupService;
+use mod_ortattendance\services\QueueService;
 use mod_ortattendance\utils\ZoomUtils;
 use mod_ortattendance\recollectors\ZoomRecollectorBackup;
 
 defined('MOODLE_INTERNAL') || die();
 
 require_once(__DIR__ . '/../services/BackupService.php');
+require_once(__DIR__ . '/../services/QueueService.php');
 require_once(__DIR__ . '/../utils/ZoomUtils.php');
 require_once(__DIR__ . '/../recollectors/ZoomRecollectorBackup.php');
 
@@ -53,40 +55,55 @@ class backup_task extends \core\task\scheduled_task {
      * Works for Zoom
      */
     private function processBackupQueue($instance, $limit, $recollectorType) {
-        global $DB;
-        
         mtrace("  Processing backup queue...");
-        
-        // Get pending recordings
-        $pending = $DB->get_records('ortattendance_backup', [
-            'bot_id' => $instance->id,
-            'processed' => 0
-        ], 'timecreated ASC', '*', 0, $limit);
-        
+
+        // Get pending recordings using QueueService
+        $pending = QueueService::getPendingBackups($instance->id, $limit);
+
+        // Defensive: Ensure pending is array
+        if (!is_array($pending)) {
+            mtrace("  Warning: getPendingBackups returned non-array");
+            $pending = [];
+        }
+
         mtrace("  Found " . count($pending) . " pending recordings");
-        
+
         $processed = 0;
+        $failed = 0;
+
         foreach ($pending as $item) {
-            mtrace("    Processing: {$item->meeting_id}");
-            
+            mtrace("    Processing: {$item->meeting_id} ({$item->meeting_name})");
+
             try {
                 // Get the appropriate backup recollector
                 if ($recollectorType === 'zoom') {
                     $backupRecollector = new ZoomRecollectorBackup($instance->course);
+                } else {
+                    mtrace("      Skipped: Unsupported recollector type: {$recollectorType}");
+                    continue;
                 }
-                
-                // Process the recording (both delegateto BackupService!)
+
+                // Process the recording (delegates to BackupService)
                 $backupRecollector->processRecordings([$item->meeting_id]);
-                
-                // Mark as processed
-                $DB->set_field('ortattendance_backup', 'processed', 1, ['id' => $item->id]);
+
+                // Mark as processed using QueueService
+                QueueService::markBackupProcessed($item->id);
                 $processed++;
-                
+
+                mtrace("      Success");
+
             } catch (\Exception $e) {
                 mtrace("      Error: " . $e->getMessage());
+                $failed++;
             }
         }
-        
-        mtrace("  Processed {$processed} recordings for instance {$instance->id}");
+
+        mtrace("  Instance {$instance->id}: Processed {$processed}, Failed {$failed}");
+
+        // Report remaining pending backups
+        $remaining = QueueService::countPendingBackups($instance->id);
+        if ($remaining > 0) {
+            mtrace("  {$remaining} recordings still pending for instance {$instance->id}");
+        }
     }
 }

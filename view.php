@@ -81,7 +81,7 @@ if ($attendanceModuleId) {
             AND cm.deletioninprogress = 0";
     $result = $DB->get_record_sql($sql, array('course' => $cm->course, 'moduleid' => $attendanceModuleId));
     
-    if ($result->count == 0) {
+    if ($result && $result->count == 0) {
         \core\notification::error(get_string('errornoattendance', 'mod_ortattendance'));
     }
 }

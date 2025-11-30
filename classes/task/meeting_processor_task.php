@@ -21,9 +21,16 @@ class meeting_processor_task extends \core\task\adhoc_task {
         
         try {
             $orchestrator = new Orchestrator($data->courseId, $data->instanceId);
-            $absentStudents = $orchestrator->process();
-            
-            mtrace("Processing completed. Absent students: " . count($absentStudents));
+            $result = $orchestrator->process();
+
+            // Defensive: Ensure result is array
+            if (!is_array($result)) {
+                mtrace("Warning: process() returned non-array result");
+                $result = ['absent_count' => 0];
+            }
+
+            $absentCount = $result['absent_count'] ?? 0;
+            mtrace("Processing completed. Absent students: {$absentCount}");
             
         } catch (\Exception $e) {
             mtrace("Error: " . $e->getMessage());

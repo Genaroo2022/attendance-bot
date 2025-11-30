@@ -37,12 +37,17 @@ class ZoomRecollectorData extends BaseRecollector {
     public function getStudentsByCourseId(): array {
         global $DB;
 
-        // NEW: Get installation config for daily chunking
-        $config = $DB->get_record('ortattendance', ['course' => $this->courseId],
-            'last_processed_date, start_date, end_date');
+        try {
+            // NEW: Get installation config for daily chunking
+            $config = $DB->get_record('ortattendance', ['course' => $this->courseId],
+                'last_processed_date, start_date, end_date');
 
-        if (!$config) {
-            throw new \Exception("Ortattendance configuration not found for course {$this->courseId}");
+            if (!$config) {
+                throw new \Exception("Ortattendance configuration not found for course {$this->courseId}");
+            }
+        } catch (\Exception $e) {
+            mtrace("  Error fetching ortattendance config: " . $e->getMessage());
+            throw $e;
         }
 
         // Determine next day to process
@@ -76,43 +81,75 @@ class ZoomRecollectorData extends BaseRecollector {
         $teachers = [];
 
         foreach ($zoomIds as $zoomId) {
-            // Get meetings for THIS DAY ONLY
-            $sql = "SELECT * FROM {zoom_meeting_details}
-                    WHERE zoomid = :zoomid
-                    AND start_time >= :target_date
-                    AND start_time < :target_date_end
-                    AND duration > 1
-                    AND participants_count > 1";
-
-            $meetings = $DB->get_records_sql($sql, [
-                'zoomid' => $zoomId,
-                'target_date' => $targetDate,
-                'target_date_end' => $targetDateEnd
-            ]);
-
-            if (empty($meetings)) {
-                continue;
-            }
-
-            mtrace("      Zoom {$zoomId}: " . count($meetings) . " meetings");
-
-            // Process meetings from this day
-            $detailsId = array_values(array_map(function($record) { return $record->id; }, $meetings));
-
             try {
-                $participants = $this->getStudentsByMeetingId($detailsId, $this->checkCamera);
-                $students = array_merge($students, $participants['students']);
-                $teachers = array_merge($teachers, $participants['teachers']);
+                // Get meetings for THIS DAY ONLY
+                // Handle both INT (Unix timestamp) and TEXT (DATETIME) formats
+                $targetDateStr = date('Y-m-d', $targetDate);
+                $targetDateEndStr = date('Y-m-d', $targetDateEnd);
+
+                $sql = "SELECT * FROM {zoom_meeting_details}
+                        WHERE zoomid = :zoomid
+                        AND (
+                            (start_time >= :target_date AND start_time < :target_date_end)
+                            OR (start_time >= :target_date_str AND start_time < :target_date_end_str)
+                        )
+                        AND duration > 1
+                        AND participants_count > 1";
+
+                $meetings = $DB->get_records_sql($sql, [
+                    'zoomid' => $zoomId,
+                    'target_date' => $targetDate,
+                    'target_date_end' => $targetDateEnd,
+                    'target_date_str' => $targetDateStr,
+                    'target_date_end_str' => $targetDateEndStr
+                ]);
+
+                // Ensure meetings is always an array
+                if (!is_array($meetings)) {
+                    mtrace("      Warning: Query returned non-array for zoom {$zoomId}");
+                    continue;
+                }
+
+                if (empty($meetings)) {
+                    continue;
+                }
+
+                mtrace("      Zoom {$zoomId}: " . count($meetings) . " meetings");
+
+                // Process meetings from this day
+                $detailsId = array_values(array_map(function($record) { return $record->id; }, $meetings));
+
+                try {
+                    $participants = $this->getStudentsByMeetingId($detailsId, $this->checkCamera);
+
+                    // Validate participants structure
+                    if (!is_array($participants) || !isset($participants['students']) || !isset($participants['teachers'])) {
+                        mtrace("      WARNING: getStudentsByMeetingId returned invalid data. Skipping.");
+                        continue;
+                    }
+
+                    $students = array_merge($students, $participants['students']);
+                    $teachers = array_merge($teachers, $participants['teachers']);
+                } catch (\Exception $e) {
+                    mtrace("      Error processing zoom {$zoomId}: " . $e->getMessage());
+                    throw $e;
+                }
             } catch (\Exception $e) {
-                mtrace("      Error processing zoom {$zoomId}: " . $e->getMessage());
-                throw $e;
+                mtrace("      Error querying meetings for zoom {$zoomId}: " . $e->getMessage());
+                // Continue to next zoom instance
+                continue;
             }
         }
 
         mtrace("      Total: " . count($students) . " students, " . count($teachers) . " teachers");
 
         // Update last_processed_date for this day
-        $DB->set_field('ortattendance', 'last_processed_date', $targetDate, ['course' => $this->courseId]);
+        try {
+            $DB->set_field('ortattendance', 'last_processed_date', $targetDate, ['course' => $this->courseId]);
+        } catch (\Exception $e) {
+            mtrace("      Warning: Failed to update last_processed_date: " . $e->getMessage());
+            // Non-fatal, continue processing
+        }
 
         return [
             'students' => $students,
@@ -140,6 +177,12 @@ class ZoomRecollectorData extends BaseRecollector {
             }
 
             mtrace("  Retrieved " . count($attendanceData) . " participant records from database");
+
+            // Validate attendanceData is a proper array
+            if (!is_array($attendanceData)) {
+                mtrace("  Warning: attendanceData is not an array, converting to empty array");
+                $attendanceData = [];
+            }
 
             if ($checkCamera) {
                 mtrace("  Checking camera status...");
@@ -245,50 +288,65 @@ class ZoomRecollectorData extends BaseRecollector {
 
     public function getMeetingsByZoomId($zoomId): array {
         global $DB;
-        
+
         mtrace("    Querying meetings for zoomid: {$zoomId}");
-        
-        // Get bot configuration for date and time range
-        $config = $DB->get_record('ortattendance', ['course' => $this->courseId], 
-            'start_date, end_date, start_time, end_time', MUST_EXIST);
-        
-        $startDate = $config->start_date; // Unix timestamp for start date
-        $endDate = $config->end_date;     // Unix timestamp for end date
-        $classStartTime = $config->start_time; // seconds since midnight
-        $classFinishTime = $config->end_time; // seconds since midnight
-        
-        mtrace("    Date range: " . date('Y-m-d', $startDate) . " to " . date('Y-m-d', $endDate));
-        mtrace("    Time range: " . gmdate('H:i', $classStartTime) . " to " . gmdate('H:i', $classFinishTime));
-        
-        // Query all meetings within the date range and time window
-        // Match meetings that fall within the daily class time window
-        $sql = "SELECT * FROM {zoom_meeting_details} 
-                WHERE zoomid = :zoomid 
-                AND start_time >= :start_date
-                AND start_time <= :end_date
-                AND duration > 1 
-                AND participants_count > 1";
-        
-        $results = $DB->get_records_sql($sql, [
-            'zoomid' => $zoomId, 
-            'start_date' => $startDate,
-            'end_date' => $endDate
-        ]);
-        
-        $results = array_values($results); // Re-index array
-        
-        mtrace("    Query returned " . count($results) . " meetings");
-        
-        if (!empty($results)) {
-            foreach ($results as $meeting) {
-                mtrace("      - meeting_id: '{$meeting->meeting_id}' (stored as integer)");
-                mtrace("        topic: '{$meeting->topic}'");
-                mtrace("        details_id: {$meeting->id}");
-                mtrace("        start: " . date('Y-m-d H:i:s', $meeting->start_time));
+
+        try {
+            // Get bot configuration for date and time range
+            $config = $DB->get_record('ortattendance', ['course' => $this->courseId],
+                'start_date, end_date, start_time, end_time', MUST_EXIST);
+
+            if (!$config) {
+                throw new \Exception("Configuration not found for course {$this->courseId}");
             }
+
+            $startDate = $config->start_date; // Unix timestamp for start date
+            $endDate = $config->end_date;     // Unix timestamp for end date
+            $classStartTime = $config->start_time; // seconds since midnight
+            $classFinishTime = $config->end_time; // seconds since midnight
+
+            mtrace("    Date range: " . date('Y-m-d', $startDate) . " to " . date('Y-m-d', $endDate));
+            mtrace("    Time range: " . gmdate('H:i', $classStartTime) . " to " . gmdate('H:i', $classFinishTime));
+
+            // Query all meetings within the date range and time window
+            // Match meetings that fall within the daily class time window
+            $sql = "SELECT * FROM {zoom_meeting_details}
+                    WHERE zoomid = :zoomid
+                    AND start_time >= :start_date
+                    AND start_time <= :end_date
+                    AND duration > 1
+                    AND participants_count > 1";
+
+            $results = $DB->get_records_sql($sql, [
+                'zoomid' => $zoomId,
+                'start_date' => $startDate,
+                'end_date' => $endDate
+            ]);
+
+            // Ensure we always return an array (DB can return null/false on error)
+            if (!is_array($results)) {
+                mtrace("    Warning: Query returned non-array result for zoomid {$zoomId}");
+                return [];
+            }
+
+            $results = array_values($results); // Re-index array
+
+            mtrace("    Query returned " . count($results) . " meetings");
+
+            if (!empty($results)) {
+                foreach ($results as $meeting) {
+                    mtrace("      - meeting_id: '{$meeting->meeting_id}' (stored as integer)");
+                    mtrace("        topic: '{$meeting->topic}'");
+                    mtrace("        details_id: {$meeting->id}");
+                    mtrace("        start: " . date('Y-m-d H:i:s', $meeting->start_time));
+                }
+            }
+
+            return $results;
+        } catch (\Exception $e) {
+            mtrace("    Error querying meetings: " . $e->getMessage());
+            return [];
         }
-        
-        return $results;
     }
     
     /**
@@ -355,6 +413,12 @@ class ZoomRecollectorData extends BaseRecollector {
             'minutes_of_tolerance' => $lateTolerance
         ]);
         
+        // Ensure we always return an array (DB can return null/false on error)
+        if (!is_array($results)) {
+            mtrace("  Warning: Query returned non-array result for detailId $detailId");
+            $results = [];
+        }
+        
         mtrace("  Debug: Found " . count($results) . " participants");
         
         return $results;
@@ -417,6 +481,12 @@ class ZoomRecollectorData extends BaseRecollector {
     $params = array_merge(['minutes_of_tolerance' => $lateTolerance], $inParams);
     $results = $DB->get_records_sql($sql, $params);
     
+    // Ensure we always return an array (DB can return null/false on error)
+    if (!is_array($results)) {
+        mtrace("  Warning: Query returned non-array result for multiple details");
+        $results = [];
+    }
+    
     mtrace("  Debug: Found " . count($results) . " participant records across meetings");
     
     return $results;
@@ -424,21 +494,61 @@ class ZoomRecollectorData extends BaseRecollector {
 
     private function getUsersWithCameraOn($meetingIds): array {
         global $DB;
-        
+
+        // NOTE: Camera checking is currently disabled because the zoom_meeting_participants
+        // table does not have a 'has_video' field in the current Zoom module version.
+        // This functionality was removed from the Zoom module.
+        //
+        // WORKAROUND: Return ALL participant user IDs to treat everyone as having camera on.
+        // This prevents camera requirement from blocking attendance processing.
+        //
+        // If Zoom module adds this field back in the future, uncomment the code below:
+        //
+        // list($inSql, $params) = $DB->get_in_or_equal($meetingIds, SQL_PARAMS_NAMED);
+        // $sql = "SELECT DISTINCT zmp.userid FROM {zoom_meeting_participants} zmp
+        //         WHERE zmp.detailsid $inSql AND zmp.has_video = 1";
+        // $records = $DB->get_records_sql($sql, $params);
+        // return array_keys($records);
+
+        mtrace("  WARNING: Camera checking is disabled (zoom_meeting_participants.has_video field does not exist)");
+        mtrace("  WORKAROUND: Treating all participants as having camera ON");
+
+        // Get all user IDs for participants in these meetings
         list($inSql, $params) = $DB->get_in_or_equal($meetingIds, SQL_PARAMS_NAMED);
-        
-        $sql = "SELECT DISTINCT zmp.userid FROM {zoom_meeting_participants} zmp
-                WHERE zmp.detailsid $inSql AND zmp.has_video = 1";
-                
+        $sql = "SELECT DISTINCT zmp.userid
+                FROM {zoom_meeting_participants} zmp
+                WHERE zmp.detailsid $inSql
+                AND zmp.userid IS NOT NULL";
+
         $records = $DB->get_records_sql($sql, $params);
+        
+        // Ensure records is always an array
+        if (!is_array($records)) {
+            mtrace("  Warning: Camera check query returned non-array");
+            return [];
+        }
+        
         return array_keys($records);
     }
     
     private function getAllInstanceByModuleName($moduleName, $courseId): array {
         global $DB;
         $moduleId = $this->getModuleId($moduleName);
+        
+        if (!$moduleId) {
+            mtrace("  Warning: Module '{$moduleName}' not found");
+            return [];
+        }
+        
         $sql = "SELECT * FROM {course_modules} WHERE course = :course AND module = :moduleid AND deletioninprogress = 0";
         $pluginModules = $DB->get_records_sql($sql, array('course' => $courseId, 'moduleid' => $moduleId));
+        
+        // Ensure pluginModules is always an array
+        if (!is_array($pluginModules)) {
+            mtrace("  Warning: Query for module instances returned non-array");
+            return [];
+        }
+        
         $instancesId = [];
         foreach ($pluginModules as $module) {
             $instancesId[] = $module->instance;

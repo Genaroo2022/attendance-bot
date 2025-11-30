@@ -15,6 +15,7 @@ use mod_ortattendance\recollectors\BaseRecollector;
 use mod_ortattendance\recollectors\ZoomRecollectorData;
 use mod_ortattendance\recollectors\ZoomRecollectorBackup;
 use mod_ortattendance\utils\ZoomUtils;
+use mod_ortattendance\services\QueueService;
 
 defined('MOODLE_INTERNAL') || die();
 
@@ -24,6 +25,7 @@ require_once(__DIR__ . '/../recollectors/BaseRecollector.php');
 require_once(__DIR__ . '/../recollectors/ZoomRecollectorData.php');
 require_once(__DIR__ . '/../recollectors/ZoomRecollectorBackup.php');
 require_once(__DIR__ . '/../utils/ZoomUtils.php');
+require_once(__DIR__ . '/../services/QueueService.php');
 
 class Orchestrator {
 
@@ -44,6 +46,11 @@ class Orchestrator {
     public function process(): array {
         $data = $this->recollector->getStudentsByCourseId();
 
+        // Validate data structure
+        if (!is_array($data)) {
+            throw new \Exception("Recollector returned invalid data (not an array)");
+        }
+
         // NEW: Check if caught up (no more data to process)
         if (isset($data['caught_up']) && $data['caught_up']) {
             return [
@@ -55,8 +62,23 @@ class Orchestrator {
             ];
         }
 
+        // Validate required keys exist
+        if (!isset($data['students']) || !isset($data['teachers'])) {
+            throw new \Exception("Recollector returned incomplete data (missing students or teachers)");
+        }
+
         $students = $data['students'];
         $teachers = $data['teachers'];
+
+        // Defensive: Ensure arrays
+        if (!is_array($students)) {
+            mtrace('    WARNING: students is not an array, converting to empty array');
+            $students = [];
+        }
+        if (!is_array($teachers)) {
+            mtrace('    WARNING: teachers is not an array, converting to empty array');
+            $teachers = [];
+        }
 
         mtrace('    Students found: ' . count($students));
         mtrace('    Teachers found: ' . count($teachers));
@@ -65,6 +87,12 @@ class Orchestrator {
 
         if (count($students) > 0 || count($teachers) > 0) {
             $absentStudents = $this->persistence->persistStudents($students, $teachers);
+        }
+
+        // Defensive: Ensure absentStudents is array
+        if (!is_array($absentStudents)) {
+            mtrace('    WARNING: absentStudents is not an array, converting to empty array');
+            $absentStudents = [];
         }
 
         return [
@@ -149,25 +177,82 @@ class Orchestrator {
     }
 
     /**
-     * Process recordings for meetings
-     * 
+     * Queue recordings for async processing (instead of processing synchronously)
+     *
      * @return void
      */
     public function processRecordings(): void {
-        mtrace("Orchestrator: Processing recordings with recollector type: {$this->recollectorType}");
-        
-        // ZoomRecollector still needs meeting IDs from database
-        if ($this->recollectorType === 'local') {
-            $this->backupRecollector->processRecordings();
-        } else if ($this->backupRecollector) {
-            // Use backup recollector for recordings
-            $zoomIds = $this->getAllInstanceByModuleName('zoom', $this->courseId);
-            
-            foreach ($zoomIds as $zoomId) {
-                $meetings = $this->recollector->getMeetingsByZoomId($zoomId); 
-                $meetingIds = array_values(array_map(fn($r) => $r->meeting_id, $meetings)); 
-                $this->backupRecollector->processRecordings($meetingIds);
+        mtrace("Orchestrator: Queueing recordings for async processing (recollector type: {$this->recollectorType})");
+
+        try {
+            // For local recollector, still process synchronously
+            if ($this->recollectorType === 'local') {
+                $this->backupRecollector->processRecordings();
+                return;
             }
+
+            // For Zoom: Queue recordings for async processing via backup_task
+            if ($this->backupRecollector) {
+                $zoomIds = $this->getAllInstanceByModuleName('zoom', $this->courseId);
+
+                if (empty($zoomIds)) {
+                    mtrace("  No Zoom instances found for course {$this->courseId}");
+                    return;
+                }
+
+                $totalQueued = 0;
+                $totalSkipped = 0;
+                $totalErrors = 0;
+
+                foreach ($zoomIds as $zoomId) {
+                    try {
+                        $meetings = $this->recollector->getMeetingsByZoomId($zoomId);
+
+                        if (empty($meetings)) {
+                            mtrace("  No meetings found for Zoom ID: {$zoomId}");
+                            continue;
+                        }
+
+                        // Prepare recordings for queue
+                        $recordings = [];
+                        foreach ($meetings as $meeting) {
+                            if (!isset($meeting->meeting_id)) {
+                                mtrace("  Warning: Meeting missing meeting_id, skipping");
+                                continue;
+                            }
+
+                            $recordings[] = (object)[
+                                'meeting_id' => $meeting->meeting_id,
+                                'meeting_name' => $meeting->topic ?? 'Unknown Meeting'
+                            ];
+                        }
+
+                        if (empty($recordings)) {
+                            mtrace("  No valid recordings to queue for Zoom ID: {$zoomId}");
+                            continue;
+                        }
+
+                        // Add to backup queue
+                        $result = QueueService::addRecordingsToBackup($this->installationId, $recordings);
+                        $totalQueued += $result['queued'];
+                        $totalSkipped += $result['skipped'];
+
+                        mtrace("  Zoom ID {$zoomId}: Queued {$result['queued']}, Skipped {$result['skipped']} recordings");
+
+                    } catch (\Exception $e) {
+                        mtrace("  Error processing Zoom ID {$zoomId}: " . $e->getMessage());
+                        $totalErrors++;
+                    }
+                }
+
+                mtrace("Orchestrator: Total queued: {$totalQueued}, Total skipped: {$totalSkipped}, Errors: {$totalErrors}");
+
+                $pending = QueueService::countPendingBackups($this->installationId);
+                mtrace("Orchestrator: Total pending backups in queue: {$pending}");
+            }
+        } catch (\Exception $e) {
+            mtrace("Orchestrator: Fatal error in processRecordings: " . $e->getMessage());
+            throw $e;
         }
     }
     
@@ -181,8 +266,21 @@ class Orchestrator {
     private function getAllInstanceByModuleName($moduleName, $courseId): array {
         global $DB;
         $moduleId = $this->getModuleId($moduleName);
+        
+        if (!$moduleId) {
+            mtrace("  Warning: Module '{$moduleName}' not found");
+            return [];
+        }
+        
         $sql = "SELECT * FROM {course_modules} WHERE course = :course AND module = :moduleid AND deletioninprogress = 0";
         $pluginModules = $DB->get_records_sql($sql, array('course' => $courseId, 'moduleid' => $moduleId));
+        
+        // Ensure pluginModules is always an array
+        if (!is_array($pluginModules)) {
+            mtrace("  Warning: Query for module instances returned non-array");
+            return [];
+        }
+        
         $instancesId = [];
         foreach ($pluginModules as $module) {
             $instancesId[] = $module->instance;

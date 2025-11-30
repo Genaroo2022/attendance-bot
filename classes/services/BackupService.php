@@ -23,32 +23,44 @@ class BackupService {
     
     public static function processRecording($meetingId, $meetingName, $meetingTimestamp, $courseId, $deleteFromSource = false, $recollector = null) {
         global $DB;
-        
+
         try {
+            // Validate inputs
+            if (empty($meetingId)) {
+                return ['success' => false, 'error' => 'Meeting ID is required'];
+            }
+            if (empty($courseId)) {
+                return ['success' => false, 'error' => 'Course ID is required'];
+            }
+
             if ($recollector !== null) {
                 $metadata = $recollector->getRecordingMetadata($meetingId);
             } else {
                 $metadata = ZoomUtils::getRecordingMetadata($meetingId);
             }
-            
+
             if (!$metadata || empty($metadata['recording_files'])) {
                 return ['success' => false, 'error' => 'No recordings found'];
             }
-            
+
             $normalized = NameNormalizer::normalizeFileName($meetingName, $meetingTimestamp);
             $videoFile = self::findVideoFile($metadata['recording_files']);
-            
+
             if (!$videoFile) {
                 return ['success' => false, 'error' => 'No video file found'];
             }
-            
+
+            if (empty($videoFile['download_url'])) {
+                return ['success' => false, 'error' => 'Recording download URL is missing'];
+            }
+
             $localPath = self::downloadToLocal($videoFile, $normalized, $recollector);
-            
+
             // Upload to Moodle course folders using MoodleMirroring
             $filename = $normalized['name'] . '_' . $normalized['date'] . '.mp4';
             $folderName = $normalized['name'];
             $subfolderName = $normalized['date'];
-            
+
             $fileId = MoodleMirroring::uploadToMoodle(
                 $courseId,
                 $folderName,
@@ -56,27 +68,35 @@ class BackupService {
                 $filename,
                 $localPath
             );
-            
+
+            if (!$fileId) {
+                throw new \Exception("Failed to upload recording to Moodle");
+            }
+
             // Delete from source if requested
             if ($deleteFromSource) {
-                if ($recollector !== null && method_exists($recollector, 'deleteRecording')) {
-                    $deleted = $recollector->deleteRecording($meetingId);
-                } else {
-                    $deleted = ZoomUtils::deleteRecording($meetingId);
-                }
-                
-                if (!$deleted) {
-                    mtrace("  Warning: Failed to delete recording from source");
+                try {
+                    if ($recollector !== null && method_exists($recollector, 'deleteRecording')) {
+                        $deleted = $recollector->deleteRecording($meetingId);
+                    } else {
+                        $deleted = ZoomUtils::deleteRecording($meetingId);
+                    }
+
+                    if (!$deleted) {
+                        mtrace("  Warning: Failed to delete recording from source");
+                    }
+                } catch (\Exception $e) {
+                    mtrace("  Warning: Error deleting recording from source: " . $e->getMessage());
                 }
             }
-            
+
             return [
                 'success' => true,
                 'localPath' => $localPath,
                 'fileId' => $fileId,
                 'size' => filesize($localPath)
             ];
-            
+
         } catch (\Exception $e) {
             return ['success' => false, 'error' => $e->getMessage()];
         }
@@ -98,27 +118,42 @@ class BackupService {
     
     private static function downloadToLocal($videoFile, $normalized, $recollector = null) {
         $baseDir = get_config('mod_ortattendance', 'local_directory');
-        
+
+        if (empty($baseDir)) {
+            throw new \Exception("Local directory not configured. Please set 'local_directory' in plugin settings.");
+        }
+
         if (!file_exists($baseDir)) {
             if (!mkdir($baseDir, 0755, true)) {
-                throw new \Exception("Failed to create directory: $baseDir");
+                throw new \Exception("Failed to create base directory: $baseDir");
             }
         }
-        
+
+        if (!is_writable($baseDir)) {
+            throw new \Exception("Base directory is not writable: $baseDir");
+        }
+
         $folderPath = $baseDir . '/' . implode('/', $normalized['path']);
         if (!file_exists($folderPath)) {
-            mkdir($folderPath, 0755, true);
+            if (!mkdir($folderPath, 0755, true)) {
+                throw new \Exception("Failed to create folder path: $folderPath");
+            }
         }
-        
+
         $filename = $normalized['name'] . '_' . $normalized['date'] . '.mp4';
         $filepath = $folderPath . '/' . $filename;
-        
+
         if ($recollector !== null && method_exists($recollector, 'downloadRecording')) {
             $recollector->downloadRecording($videoFile['download_url'], $filepath);
         } else {
             ZoomUtils::downloadRecording($videoFile['download_url'], $filepath);
         }
-        
+
+        // Verify download succeeded
+        if (!file_exists($filepath) || filesize($filepath) === 0) {
+            throw new \Exception("Download verification failed: file is missing or empty");
+        }
+
         return $filepath;
     }
     

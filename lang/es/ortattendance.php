@@ -45,8 +45,6 @@ $string['localdirectory'] = 'Directorio local';
 $string['localdirectory_desc'] = 'Ruta local donde se almacenarán las grabaciones';
 $string['backuplimit'] = 'Límite de descargas en respaldo';
 $string['backuplimit_desc'] = 'Número máximo de grabaciones a descargar por ejecución del task programado';
-$string['maxfilesize'] = 'Tamaño máximo de archivo';
-$string['maxfilesize_desc'] = 'Tamaño máximo permitido para respaldo en MB (las grabaciones que superen este tamaño serán omitidas)';
 
 // Zoom configuration
 $string['zoomconfig'] = 'Configuración de Zoom';
@@ -105,8 +103,14 @@ $string['localdirectory_desc'] = 'Ruta del directorio donde se almacenarán las 
 $string['backuplimit'] = 'Límite de respaldo';
 $string['backuplimit_desc'] = 'Número máximo de grabaciones a respaldar por ejecución programada';
 
-$string['maxfilesize'] = 'Tamaño máximo de archivo';
-$string['maxfilesize_desc'] = 'Tamaño máximo en MB para el respaldo de grabaciones';
-
 $string['keeplocalafterupload'] = 'Mantener archivos locales después de subirlos a Moodle';
 $string['keeplocalafterupload_desc'] = 'Mantener los archivos de grabaciones en el sistema de archivos local después de subirse correctamente a Moodle';
+
+$string['chunkingsettings'] = 'Configuración de fragmentación';
+$string['chunkingsettings_desc'] = 'Opciones de configuración para dividir el procesamiento de asistencia en fragmentos más pequeños y evitar tiempos de espera.';
+
+$string['maxdaysperrun'] = 'Máximo de días por ejecución';
+$string['maxdaysperrun_desc'] = 'Cantidad máxima de días de datos de asistencia que se procesarán por ejecución. Valores más bajos reducen el riesgo de tiempo de espera.';
+
+$string['maxexecutiontime'] = 'Tiempo máximo de ejecución (minutos)';
+$string['maxexecutiontime_desc'] = 'Tiempo máximo (en minutos) que se permite ejecutar la tarea de procesamiento de asistencia antes de detenerse. El valor predeterminado es 50 minutos.';

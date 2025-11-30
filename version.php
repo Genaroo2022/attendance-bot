@@ -10,10 +10,10 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'mod_ortattendance';
-$plugin->version = 2025112401;
+$plugin->version = 2025112903; // Incremented for null safety fixes
 $plugin->requires = 2022112800; // Moodle 4.1 or later
 $plugin->release = 'PRF-2025C2-YA-A-2';
-$plugin->maturity = MATURITY_BETA;
+$plugin->maturity = MATURITY_STABLE;
 $plugin->dependencies = [
     'mod_attendance' => ANY_VERSION,
     'mod_zoom' => ANY_VERSION,

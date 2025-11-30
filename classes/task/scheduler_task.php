@@ -20,8 +20,14 @@ class scheduler_task extends \core\task\scheduled_task {
         
         // Get active instances
         $instances = $this->get_active_installations();
+
+        if (empty($instances)) {
+            mtrace("No active installations found. Exiting.");
+            return;
+        }
+
         mtrace("Found " . count($instances) . " active installations");
-        
+
         foreach ($instances as $instance) {
             mtrace("Processing instance {$instance->id} for course {$instance->course}");
 
@@ -31,11 +37,12 @@ class scheduler_task extends \core\task\scheduled_task {
 
                 // NEW: Daily chunking loop - process multiple days per run
                 $maxDaysPerRun = get_config('mod_ortattendance', 'max_days_per_run') ?: 30;
-                $maxExecutionTime = get_config('mod_ortattendance', 'max_execution_time') ?: 3000;
+                $maxExecutionTime = get_config('mod_ortattendance', 'max_execution_time') ?: 3000; // Default 50 minutes (stored in seconds)
                 $startTime = time();
                 $daysProcessed = 0;
 
-                mtrace("  Starting daily chunking loop (max: {$maxDaysPerRun} days, timeout: {$maxExecutionTime}s)");
+                $maxExecutionMinutes = round($maxExecutionTime / 60);
+                mtrace("  Starting daily chunking loop (max: {$maxDaysPerRun} days, timeout: {$maxExecutionMinutes} minutes)");
 
                 while ($daysProcessed < $maxDaysPerRun) {
                     // Check timeout - exit gracefully if approaching limit
@@ -48,7 +55,34 @@ class scheduler_task extends \core\task\scheduled_task {
 
                     // Process next day
                     mtrace("  Processing day " . ($daysProcessed + 1) . "...");
-                    $result = $orchestrator->process();
+
+                    try {
+                        $result = $orchestrator->process();
+                    } catch (\Exception $e) {
+                        mtrace("  ✗ Error processing day: " . $e->getMessage());
+                        mtrace("  Attempting to skip problematic day and continue...");
+                        
+                        // Try to advance the last_processed_date to skip this day
+                        try {
+                            $config = $DB->get_record('ortattendance', ['id' => $instance->id], 'last_processed_date, start_date');
+                            if ($config) {
+                                $skipDate = $config->last_processed_date ? $config->last_processed_date + 86400 : $config->start_date;
+                                $DB->set_field('ortattendance', 'last_processed_date', $skipDate, ['id' => $instance->id]);
+                                mtrace("  Skipped date: " . date('Y-m-d', $skipDate));
+                                $daysProcessed++;
+                                continue; // Try next day
+                            }
+                        } catch (\Exception $skipError) {
+                            mtrace("  Could not skip day: " . $skipError->getMessage());
+                        }
+                        throw $e; // Re-throw if we couldn't skip
+                    }
+
+                    // Validate result
+                    if (!is_array($result)) {
+                        mtrace("  ✗ Error: process() returned invalid result. Stopping.");
+                        break;
+                    }
 
                     // Check result
                     if ($result['completed']) {
@@ -105,16 +139,24 @@ class scheduler_task extends \core\task\scheduled_task {
      */
     private function get_active_installations(): array {
         global $DB;
-        
+
         $now = time();
-        
+
         // Get instances within their configured date range
-        $sql = "SELECT ab.* 
+        $sql = "SELECT ab.*
                 FROM {ortattendance} ab
                 JOIN {course_modules} cm ON cm.instance = ab.id
                 JOIN {modules} m ON m.id = cm.module AND m.name = 'ortattendance'
                 WHERE cm.deletioninprogress = 0";
-        
-        return $DB->get_records_sql($sql);
+
+        $results = $DB->get_records_sql($sql);
+
+        // Defensive: Ensure we always return an array
+        if (!is_array($results)) {
+            mtrace("Warning: Database query for active installations returned non-array, using empty array");
+            return [];
+        }
+
+        return $results;
     }
 }

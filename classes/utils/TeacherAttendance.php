@@ -50,4 +50,8 @@ class TeacherAttendance {
     public function getName() {
         return $this->name;
     }
+
+    public function getLeaveTime() {
+        return $this->leaveTime;
+    }
 }
