@@ -15,6 +15,7 @@ use mod_ortattendance\recollectors\BaseRecollector;
 use mod_ortattendance\recollectors\ZoomRecollectorData;
 use mod_ortattendance\recollectors\ZoomRecollectorBackup;
 use mod_ortattendance\utils\ZoomUtils;
+use mod_ortattendance\utils\LogLevel;
 use mod_ortattendance\services\QueueService;
 
 defined('MOODLE_INTERNAL') || die();
@@ -25,6 +26,7 @@ require_once(__DIR__ . '/../recollectors/BaseRecollector.php');
 require_once(__DIR__ . '/../recollectors/ZoomRecollectorData.php');
 require_once(__DIR__ . '/../recollectors/ZoomRecollectorBackup.php');
 require_once(__DIR__ . '/../utils/ZoomUtils.php');
+require_once(__DIR__ . '/../utils/LogLevel.php');
 require_once(__DIR__ . '/../services/QueueService.php');
 
 class Orchestrator {
@@ -33,14 +35,29 @@ class Orchestrator {
     private $backupRecollector;
     private $persistence;
     private $courseId;
+    private $courseShortname;
     private $installationId;
     private $checkCamera;
     private $recollectorType;
 
     public function __construct($courseId, $installationId) {
+        global $DB;
+
         $this->courseId = $courseId;
         $this->installationId = $installationId;
+
+        // Get course shortname for better logging
+        $course = $DB->get_record('course', ['id' => $courseId], 'shortname', IGNORE_MISSING);
+        $this->courseShortname = $course ? $course->shortname : "course-{$courseId}";
+
         $this->loadValues();
+    }
+
+    /**
+     * Get formatted course identifier for logging
+     */
+    private function getCourseLogPrefix(): string {
+        return "[Course {$this->courseId} ({$this->courseShortname})]";
     }
 
     public function process(): array {
@@ -70,18 +87,20 @@ class Orchestrator {
         $students = $data['students'];
         $teachers = $data['teachers'];
 
+        $logPrefix = $this->getCourseLogPrefix();
+
         // Defensive: Ensure arrays
         if (!is_array($students)) {
-            mtrace('    WARNING: students is not an array, converting to empty array');
+            LogLevel::warning('students is not an array, converting to empty array', $logPrefix);
             $students = [];
         }
         if (!is_array($teachers)) {
-            mtrace('    WARNING: teachers is not an array, converting to empty array');
+            LogLevel::warning('teachers is not an array, converting to empty array', $logPrefix);
             $teachers = [];
         }
 
-        mtrace('    Students found: ' . count($students));
-        mtrace('    Teachers found: ' . count($teachers));
+        LogLevel::info('Students found: ' . count($students), $logPrefix);
+        LogLevel::info('Teachers found: ' . count($teachers), $logPrefix);
 
         $absentStudents = [];
 
@@ -91,7 +110,7 @@ class Orchestrator {
 
         // Defensive: Ensure absentStudents is array
         if (!is_array($absentStudents)) {
-            mtrace('    WARNING: absentStudents is not an array, converting to empty array');
+            LogLevel::warning('absentStudents is not an array, converting to empty array', $logPrefix);
             $absentStudents = [];
         }
 
@@ -114,12 +133,12 @@ class Orchestrator {
         }
 
         $this->checkCamera = (bool) $installation->camera_required;
-        
+
         // Get recollector type from settings
         $this->recollectorType = get_config('mod_ortattendance', 'recollector_type') ?: 'zoom';
-        
-        mtrace("Orchestrator: Using recollector type: {$this->recollectorType}");
-        
+
+        LogLevel::info("Orchestrator: Using recollector type: {$this->recollectorType}");
+
         $this->recollector = $this->dataRecollectorFactory($this->recollectorType);
         $this->backupRecollector = $this->backupRecollectorFactory($this->recollectorType);
         $this->persistence = $this->persistenceFactory('attendance');
@@ -134,11 +153,11 @@ class Orchestrator {
     private function dataRecollectorFactory($recollectorType): BaseRecollector {
         switch ($recollectorType) {
             case "zoom":
-                mtrace("  Creating ZoomRecollectorData");
+                LogLevel::debug("Creating ZoomRecollectorData");
                 return new ZoomRecollectorData($this->courseId, $this->checkCamera);
 
             default:
-                mtrace("  Unknown recollector type '{$recollectorType}', defaulting to ZoomRecollectorData");
+                LogLevel::warning("Unknown recollector type '{$recollectorType}', defaulting to ZoomRecollectorData");
                 return new ZoomRecollectorData($this->courseId, $this->checkCamera);
         }
     }
@@ -152,11 +171,11 @@ class Orchestrator {
     private function backupRecollectorFactory($recollectorType): BaseRecollector {
         switch ($recollectorType) {
             case "zoom":
-                mtrace("  Creating ZoomRecollectorBackup");
+                LogLevel::debug("Creating ZoomRecollectorBackup");
                 return new ZoomRecollectorBackup($this->courseId);
 
             default:
-                mtrace("  Unknown recollector type '{$recollectorType}', defaulting to ZoomRecollectorBackup");
+                LogLevel::warning("Unknown recollector type '{$recollectorType}', defaulting to ZoomRecollectorBackup");
                 return new ZoomRecollectorBackup($this->courseId);
         }
     }
@@ -182,7 +201,8 @@ class Orchestrator {
      * @return void
      */
     public function processRecordings(): void {
-        mtrace("Orchestrator: Queueing recordings for async processing (recollector type: {$this->recollectorType})");
+        $logPrefix = $this->getCourseLogPrefix();
+        LogLevel::info("Queueing recordings for async processing (recollector type: {$this->recollectorType})", $logPrefix);
 
         try {
             // For local recollector, still process synchronously
@@ -196,7 +216,7 @@ class Orchestrator {
                 $zoomIds = $this->getAllInstanceByModuleName('zoom', $this->courseId);
 
                 if (empty($zoomIds)) {
-                    mtrace("  No Zoom instances found for course {$this->courseId}");
+                    LogLevel::info("No Zoom instances found", $logPrefix);
                     return;
                 }
 
@@ -209,7 +229,7 @@ class Orchestrator {
                         $meetings = $this->recollector->getMeetingsByRecollectorId($zoomId);
 
                         if (empty($meetings)) {
-                            mtrace("  No meetings found for Zoom ID: {$zoomId}");
+                            LogLevel::debug("No meetings found for Zoom ID: {$zoomId}", $logPrefix);
                             continue;
                         }
 
@@ -217,7 +237,7 @@ class Orchestrator {
                         $recordings = [];
                         foreach ($meetings as $meeting) {
                             if (!isset($meeting->meeting_id)) {
-                                mtrace("  Warning: Meeting missing meeting_id, skipping");
+                                LogLevel::warning("Meeting missing meeting_id, skipping", $logPrefix);
                                 continue;
                             }
 
@@ -228,7 +248,7 @@ class Orchestrator {
                         }
 
                         if (empty($recordings)) {
-                            mtrace("  No valid recordings to queue for Zoom ID: {$zoomId}");
+                            LogLevel::debug("No valid recordings to queue for Zoom ID: {$zoomId}", $logPrefix);
                             continue;
                         }
 
@@ -237,21 +257,21 @@ class Orchestrator {
                         $totalQueued += $result['queued'];
                         $totalSkipped += $result['skipped'];
 
-                        mtrace("  Zoom ID {$zoomId}: Queued {$result['queued']}, Skipped {$result['skipped']} recordings");
+                        LogLevel::info("Zoom ID {$zoomId}: Queued {$result['queued']}, Skipped {$result['skipped']} recordings", $logPrefix);
 
                     } catch (\Exception $e) {
-                        mtrace("  Error processing Zoom ID {$zoomId}: " . $e->getMessage());
+                        LogLevel::error("Error processing Zoom ID {$zoomId}: " . $e->getMessage(), $logPrefix);
                         $totalErrors++;
                     }
                 }
 
-                mtrace("Orchestrator: Total queued: {$totalQueued}, Total skipped: {$totalSkipped}, Errors: {$totalErrors}");
+                LogLevel::info("Total queued: {$totalQueued}, Total skipped: {$totalSkipped}, Errors: {$totalErrors}", $logPrefix);
 
                 $pending = QueueService::countPendingBackups($this->installationId);
-                mtrace("Orchestrator: Total pending backups in queue: {$pending}");
+                LogLevel::info("Total pending backups in queue: {$pending}", $logPrefix);
             }
         } catch (\Exception $e) {
-            mtrace("Orchestrator: Fatal error in processRecordings: " . $e->getMessage());
+            LogLevel::error("Fatal error in processRecordings: " . $e->getMessage(), $logPrefix);
             throw $e;
         }
     }
@@ -265,22 +285,23 @@ class Orchestrator {
      */
     private function getAllInstanceByModuleName($moduleName, $courseId): array {
         global $DB;
+        $logPrefix = $this->getCourseLogPrefix();
         $moduleId = $this->getModuleId($moduleName);
-        
+
         if (!$moduleId) {
-            mtrace("  Warning: Module '{$moduleName}' not found");
+            LogLevel::warning("Module '{$moduleName}' not found", $logPrefix);
             return [];
         }
-        
+
         $sql = "SELECT * FROM {course_modules} WHERE course = :course AND module = :moduleid AND deletioninprogress = 0";
         $pluginModules = $DB->get_records_sql($sql, array('course' => $courseId, 'moduleid' => $moduleId));
-        
+
         // Ensure pluginModules is always an array
         if (!is_array($pluginModules)) {
-            mtrace("  Warning: Query for module instances returned non-array");
+            LogLevel::warning("Query for module instances returned non-array", $logPrefix);
             return [];
         }
-        
+
         $instancesId = [];
         foreach ($pluginModules as $module) {
             $instancesId[] = $module->instance;
@@ -296,11 +317,12 @@ class Orchestrator {
      */
     private function getModuleId($moduleName): ?int {
         global $DB;
+        $logPrefix = $this->getCourseLogPrefix();
         $sql = "SELECT id FROM {modules} WHERE name = :module_name";
         $module = $DB->get_record_sql($sql, ['module_name' => $moduleName]);
 
         if (!$module) {
-            mtrace("WARNING: Module '{$moduleName}' not found in modules table");
+            LogLevel::warning("Module '{$moduleName}' not found in modules table", $logPrefix);
             return null;
         }
 

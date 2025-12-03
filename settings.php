@@ -90,7 +90,7 @@ if ($ADMIN->fulltree) {
     $settings->add(new admin_setting_configtext('mod_ortattendance/max_days_per_run',
         get_string('maxdaysperrun', 'mod_ortattendance'),
         get_string('maxdaysperrun_desc', 'mod_ortattendance'),
-        '293',
+        '90',
         PARAM_INT));
 
     // Maximum execution time (minutes) before graceful exit - stored as seconds

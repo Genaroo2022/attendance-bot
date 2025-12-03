@@ -2,10 +2,12 @@
 namespace mod_ortattendance\task;
 
 use mod_ortattendance\orchestrator\Orchestrator;
+use mod_ortattendance\utils\LogLevel;
 
 defined('MOODLE_INTERNAL') || die();
 
 require_once(__DIR__ . '/../orchestrator/Orchestrator.php');
+require_once(__DIR__ . '/../utils/LogLevel.php');
 
 class scheduler_task extends \core\task\scheduled_task {
     
@@ -15,21 +17,26 @@ class scheduler_task extends \core\task\scheduled_task {
     
     public function execute(): void {
         global $DB;
-        
-        mtrace("Starting ortattendance scheduler task");
-        
+
+        LogLevel::info("Starting ortattendance scheduler task");
+
         // Get active instances
         $instances = $this->get_active_installations();
 
         if (empty($instances)) {
-            mtrace("No active installations found. Exiting.");
+            LogLevel::info("No active installations found. Exiting.");
             return;
         }
 
-        mtrace("Found " . count($instances) . " active installations");
+        LogLevel::info("Found " . count($instances) . " active installations");
 
         foreach ($instances as $instance) {
-            mtrace("Processing instance {$instance->id} for course {$instance->course}");
+            // Get course shortname for context
+            $course = $DB->get_record('course', ['id' => $instance->course], 'shortname', IGNORE_MISSING);
+            $courseShortname = $course ? $course->shortname : "course-{$instance->course}";
+            $instanceContext = "[Instance {$instance->id} Course {$instance->course} ({$courseShortname})]";
+
+            LogLevel::info("Processing instance {$instance->id} for course {$instance->course}", $instanceContext);
 
             try {
                 // Create orchestrator
@@ -42,45 +49,45 @@ class scheduler_task extends \core\task\scheduled_task {
                 $daysProcessed = 0;
 
                 $maxExecutionMinutes = round($maxExecutionTime / 60);
-                mtrace("  Starting daily chunking loop (max: {$maxDaysPerRun} days, timeout: {$maxExecutionMinutes} minutes)");
+                LogLevel::info("Starting daily chunking loop (max: {$maxDaysPerRun} days, timeout: {$maxExecutionMinutes} minutes)", $instanceContext);
 
                 while ($daysProcessed < $maxDaysPerRun) {
                     // Check timeout - exit gracefully if approaching limit
                     $elapsedTime = time() - $startTime;
                     if ($elapsedTime > $maxExecutionTime) {
-                        mtrace("  ⚠ Approaching timeout after processing {$daysProcessed} days ({$elapsedTime}s elapsed)");
-                        mtrace("  Exiting gracefully. Will resume on next run.");
+                        LogLevel::warning("Approaching timeout after processing {$daysProcessed} days ({$elapsedTime}s elapsed)", $instanceContext);
+                        LogLevel::info("Exiting gracefully. Will resume on next run.", $instanceContext);
                         break;
                     }
 
                     // Process next day
-                    mtrace("  Processing day " . ($daysProcessed + 1) . "...");
+                    LogLevel::debug("Processing day " . ($daysProcessed + 1) . "...", $instanceContext);
 
                     try {
                         $result = $orchestrator->process();
                     } catch (\Exception $e) {
-                        mtrace("  ✗ Error processing day: " . $e->getMessage());
-                        mtrace("  Attempting to skip problematic day and continue...");
-                        
+                        LogLevel::error("Error processing day: " . $e->getMessage(), $instanceContext);
+                        LogLevel::info("Attempting to skip problematic day and continue...", $instanceContext);
+
                         // Try to advance the last_processed_date to skip this day
                         try {
                             $config = $DB->get_record('ortattendance', ['id' => $instance->id], 'last_processed_date, start_date');
                             if ($config) {
                                 $skipDate = $config->last_processed_date ? $config->last_processed_date + 86400 : $config->start_date;
                                 $DB->set_field('ortattendance', 'last_processed_date', $skipDate, ['id' => $instance->id]);
-                                mtrace("  Skipped date: " . date('Y-m-d', $skipDate));
+                                LogLevel::info("Skipped date: " . date('Y-m-d', $skipDate), $instanceContext);
                                 $daysProcessed++;
                                 continue; // Try next day
                             }
                         } catch (\Exception $skipError) {
-                            mtrace("  Could not skip day: " . $skipError->getMessage());
+                            LogLevel::error("Could not skip day: " . $skipError->getMessage(), $instanceContext);
                         }
                         throw $e; // Re-throw if we couldn't skip
                     }
 
                     // Validate result
                     if (!is_array($result)) {
-                        mtrace("  ✗ Error: process() returned invalid result. Stopping.");
+                        LogLevel::error("process() returned invalid result. Stopping.", $instanceContext);
                         break;
                     }
 
@@ -89,17 +96,17 @@ class scheduler_task extends \core\task\scheduled_task {
                         $daysProcessed++;
                         $processedDate = $result['date'] ?? 'unknown';
                         $absentCount = $result['absent_count'] ?? 0;
-                        mtrace("    ✓ Completed: {$processedDate} ({$daysProcessed}/{$maxDaysPerRun} days, {$absentCount} absent)");
+                        LogLevel::info("Completed: {$processedDate} ({$daysProcessed}/{$maxDaysPerRun} days, {$absentCount} absent)", $instanceContext);
                     }
 
                     // Check if caught up or no more data
                     if ($result['caught_up']) {
-                        mtrace("  ✓ Caught up to today! Processed {$daysProcessed} days total.");
+                        LogLevel::info("Caught up to today! Processed {$daysProcessed} days total.", $instanceContext);
                         break;
                     }
 
                     if ($result['no_more_data']) {
-                        mtrace("  ℹ No more meetings to process.");
+                        LogLevel::info("No more meetings to process.", $instanceContext);
                         break;
                     }
 
@@ -107,17 +114,17 @@ class scheduler_task extends \core\task\scheduled_task {
                     usleep(100000); // 0.1 second pause
                 }
 
-                mtrace("  Daily chunking complete: {$daysProcessed} days processed");
+                LogLevel::info("Daily chunking complete: {$daysProcessed} days processed", $instanceContext);
 
                 // Process recordings if enabled (original functionality)
                 if ($instance->backup_recordings) {
-                    mtrace("  Processing recordings...");
+                    LogLevel::debug("Processing recordings...", $instanceContext);
                     $orchestrator->processRecordings();
-                    mtrace("  Recordings queued for backup_task");
+                    LogLevel::info("Recordings queued for backup_task", $instanceContext);
                 }
 
             } catch (\Exception $e) {
-                mtrace("  ✗ Error processing instance {$instance->id}: " . $e->getMessage());
+                LogLevel::error("Error processing instance {$instance->id}: " . $e->getMessage(), $instanceContext);
 
                 // Update status to error (check if field exists first)
                 $dbman = $DB->get_manager();
@@ -129,9 +136,9 @@ class scheduler_task extends \core\task\scheduled_task {
             }
         }
         
-        mtrace("Scheduler task completed");
+        LogLevel::info("Scheduler task completed");
     }
-    
+
     /**
      * Get all active ortattendance installations
      *
@@ -153,7 +160,7 @@ class scheduler_task extends \core\task\scheduled_task {
 
         // Defensive: Ensure we always return an array
         if (!is_array($results)) {
-            mtrace("Warning: Database query for active installations returned non-array, using empty array");
+            LogLevel::warning("Database query for active installations returned non-array, using empty array");
             return [];
         }
 

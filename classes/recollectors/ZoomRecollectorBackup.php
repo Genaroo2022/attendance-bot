@@ -10,18 +10,34 @@
 namespace mod_ortattendance\recollectors;
 
 use mod_ortattendance\services\BackupService;
+use mod_ortattendance\utils\LogLevel;
 
 defined('MOODLE_INTERNAL') || die();
 
 require_once(__DIR__ . '/BaseRecollector.php');
 require_once(__DIR__ . '/../services/BackupService.php');
+require_once(__DIR__ . '/../utils/LogLevel.php');
 
 class ZoomRecollectorBackup extends BaseRecollector {
 
     private $courseId;
+    private $courseShortname;
 
     public function __construct($courseId) {
+        global $DB;
+
         $this->courseId = $courseId;
+
+        // Get course shortname for better logging
+        $course = $DB->get_record('course', ['id' => $courseId], 'shortname', IGNORE_MISSING);
+        $this->courseShortname = $course ? $course->shortname : "course-{$courseId}";
+    }
+
+    /**
+     * Get formatted course identifier for logging
+     */
+    private function getCourseLogPrefix(): string {
+        return "[Course {$this->courseId} ({$this->courseShortname})]";
     }
 
     // ==================== RECORDING MANAGEMENT FUNCTIONALITY ====================
@@ -34,17 +50,19 @@ class ZoomRecollectorBackup extends BaseRecollector {
      */
     public function processRecordings($meetingIds = []): void {
         global $DB;
-        
+
+        $logPrefix = $this->getCourseLogPrefix();
+
         if (empty($meetingIds)) {
-            mtrace("ZoomRecollectorBackup: No meeting IDs provided for recording processing");
+            LogLevel::warning("No meeting IDs provided for recording processing", $logPrefix);
             return;
         }
-        
+
         foreach ($meetingIds as $meetingId) {
             $config = $DB->get_record('ortattendance', ['course' => $this->courseId], '*');
 
             if (!$config) {
-                mtrace("WARNING: No ortattendance config found for course {$this->courseId}");
+                LogLevel::warning("No ortattendance config found", $logPrefix);
                 continue;
             }
 
@@ -54,12 +72,12 @@ class ZoomRecollectorBackup extends BaseRecollector {
 
             $meetingDetails = $this->getMeetingDetails($meetingId);
             if (!$meetingDetails) {
-                mtrace("WARNING: Meeting details not found for meeting ID: {$meetingId}");
+                LogLevel::warning("Meeting details not found for meeting ID: {$meetingId}", $logPrefix);
                 continue;
             }
-            
-            mtrace("Processing recording for meeting: {$meetingDetails->name}");
-            
+
+            LogLevel::info("Processing recording for meeting: {$meetingDetails->name}", $logPrefix);
+
             $result = BackupService::processRecording(
                 $meetingId,
                 $meetingDetails->name,
@@ -67,11 +85,11 @@ class ZoomRecollectorBackup extends BaseRecollector {
                 $this->courseId,
                 (bool)$config->delete_from_source
             );
-            
+
             if ($result['success']) {
-                mtrace("  Success: Backed up to {$result['localPath']}");
+                LogLevel::info("Success: Backed up to {$result['localPath']}", $logPrefix);
             } else {
-                mtrace("  Error: {$result['error']}");
+                LogLevel::error("Backup failed: {$result['error']}", $logPrefix);
             }
         }
     }
@@ -84,6 +102,8 @@ class ZoomRecollectorBackup extends BaseRecollector {
      */
     private function getMeetingDetails($meetingId): object|false {
         global $DB;
+
+        $logPrefix = $this->getCourseLogPrefix();
 
         try {
             $sql = "SELECT * FROM {zoom_meeting_details} WHERE meeting_id = :meetingid LIMIT 1";
@@ -100,7 +120,7 @@ class ZoomRecollectorBackup extends BaseRecollector {
 
             return false;
         } catch (\Exception $e) {
-            mtrace("  Error fetching meeting details for {$meetingId}: " . $e->getMessage());
+            LogLevel::error("Error fetching meeting details for {$meetingId}: " . $e->getMessage(), $logPrefix);
             return false;
         }
     }

@@ -12,12 +12,14 @@ namespace mod_ortattendance\services;
 use mod_ortattendance\backup\NameNormalizer;
 use mod_ortattendance\backup\MoodleMirroring;
 use mod_ortattendance\utils\ZoomUtils;
+use mod_ortattendance\utils\LogLevel;
 
 defined('MOODLE_INTERNAL') || die();
 
 require_once(__DIR__ . '/../backup/NameNormalizer.php');
 require_once(__DIR__ . '/../backup/MoodleMirroring.php');
 require_once(__DIR__ . '/../utils/ZoomUtils.php');
+require_once(__DIR__ . '/../utils/LogLevel.php');
 
 class BackupService {
     
@@ -75,6 +77,7 @@ class BackupService {
 
             // Delete from source if requested
             if ($deleteFromSource) {
+                $context = "[Course {$courseId} Meeting {$meetingId}]";
                 try {
                     if ($recollector !== null && method_exists($recollector, 'deleteRecording')) {
                         $deleted = $recollector->deleteRecording($meetingId);
@@ -83,10 +86,10 @@ class BackupService {
                     }
 
                     if (!$deleted) {
-                        mtrace("  Warning: Failed to delete recording from source");
+                        LogLevel::warning("Failed to delete recording from source", $context);
                     }
                 } catch (\Exception $e) {
-                    mtrace("  Warning: Error deleting recording from source: " . $e->getMessage());
+                    LogLevel::warning("Error deleting recording from source: " . $e->getMessage(), $context);
                 }
             }
 

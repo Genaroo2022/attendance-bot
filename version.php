@@ -10,7 +10,7 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'mod_ortattendance';
-$plugin->version = 2025113004;
+$plugin->version = 2025120104;
 $plugin->requires = 2022112800; // Moodle 4.1 or later
 $plugin->release = 'PRF-2025C2-YA-A-2';
 $plugin->maturity = MATURITY_STABLE;

@@ -1,7 +1,11 @@
 <?php
 namespace mod_ortattendance\services;
 
+use mod_ortattendance\utils\LogLevel;
+
 defined('MOODLE_INTERNAL') || die();
+
+require_once(__DIR__ . '/../utils/LogLevel.php');
 
 class QueueService {
     
@@ -11,9 +15,11 @@ class QueueService {
     public static function addMeetings($botId, $meetings, $priority = self::PRIORITY_RETROACTIVE) {
         global $DB;
 
+        $context = "[BotID {$botId}]";
+
         // Defensive: Validate input is array
         if (!is_array($meetings)) {
-            mtrace("WARNING: QueueService::addMeetings called with non-array parameter");
+            LogLevel::warning("QueueService::addMeetings called with non-array parameter", $context);
             return ['queued' => 0, 'skipped' => 0];
         }
 
@@ -50,6 +56,8 @@ class QueueService {
     
     public static function getPending($botId, $limit = 10) {
         global $DB;
+
+        $context = "[BotID {$botId}]";
         $results = $DB->get_records('ortattendance_queue', [
             'bot_id' => $botId,
             'processed' => 0
@@ -57,7 +65,7 @@ class QueueService {
 
         // Defensive: Ensure we always return an array
         if (!is_array($results)) {
-            mtrace("WARNING: QueueService::getPending query returned non-array");
+            LogLevel::warning("QueueService::getPending query returned non-array", $context);
             return [];
         }
 
@@ -94,9 +102,11 @@ class QueueService {
     public static function addRecordingsToBackup($botId, $recordings) {
         global $DB;
 
+        $context = "[BotID {$botId}]";
+
         // Defensive: Validate input is array
         if (!is_array($recordings)) {
-            mtrace("WARNING: QueueService::addRecordingsToBackup called with non-array parameter");
+            LogLevel::warning("QueueService::addRecordingsToBackup called with non-array parameter", $context);
             return ['queued' => 0, 'skipped' => 0];
         }
 
@@ -129,7 +139,7 @@ class QueueService {
                 $DB->insert_record('ortattendance_backup', $record);
                 $queued++;
             } catch (\Exception $e) {
-                mtrace("QueueService: Failed to queue recording {$meetingId}: " . $e->getMessage());
+                LogLevel::error("Failed to queue recording {$meetingId}: " . $e->getMessage(), $context);
                 $skipped++;
             }
         }
@@ -146,6 +156,8 @@ class QueueService {
      */
     public static function getPendingBackups($botId, $limit = 10) {
         global $DB;
+
+        $context = "[BotID {$botId}]";
         $results = $DB->get_records('ortattendance_backup', [
             'bot_id' => $botId,
             'processed' => 0
@@ -153,7 +165,7 @@ class QueueService {
 
         // Defensive: Ensure we always return an array
         if (!is_array($results)) {
-            mtrace("WARNING: QueueService::getPendingBackups query returned non-array");
+            LogLevel::warning("QueueService::getPendingBackups query returned non-array", $context);
             return [];
         }
 
