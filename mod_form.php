@@ -19,16 +19,11 @@ class mod_ortattendance_mod_form extends moodleform_mod {
         
         $mform->addElement('header', 'config', get_string('configuration', 'mod_ortattendance'));
         
-        $mform->addElement('advcheckbox', 'camera_required', 
+        $mform->addElement('advcheckbox', 'camera_required',
             get_string('camerarequired', 'mod_ortattendance'),
             get_string('camerarequired_desc', 'mod_ortattendance'), null, [0, 1]);
         $mform->setDefault('camera_required', 0);
-        
-        $mform->addElement('advcheckbox', 'use_email_matching', 
-            get_string('useemailmatching', 'mod_ortattendance'),
-            get_string('useemailmatching_desc', 'mod_ortattendance'), null, [0, 1]);
-        $mform->setDefault('use_email_matching', 0);
-        
+
         $mform->addElement('text', 'min_percentage', get_string('minpercentage', 'mod_ortattendance'), ['size' => '10']);
         $mform->setType('min_percentage', PARAM_INT);
         $mform->setDefault('min_percentage', 80);

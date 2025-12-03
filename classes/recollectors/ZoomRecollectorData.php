@@ -27,25 +27,27 @@ require_once(__DIR__ . '/../services/BackupService.php');
 class ZoomRecollectorData extends BaseRecollector {
 
     private $courseId;
+    private $installationId;
     private $checkCamera;
-    private $courseShortname;
+    private $courseName;
 
-    public function __construct($courseId, $checkCamera) {
+    public function __construct($courseId, $checkCamera, $installationId = null) {
         global $DB;
 
         $this->courseId = $courseId;
+        $this->installationId = $installationId;
         $this->checkCamera = $checkCamera;
 
-        // Get course shortname for better logging
-        $course = $DB->get_record('course', ['id' => $courseId], 'shortname', IGNORE_MISSING);
-        $this->courseShortname = $course ? $course->shortname : "course-{$courseId}";
+        // Get course fullname for better logging
+        $course = $DB->get_record('course', ['id' => $courseId], 'fullname', IGNORE_MISSING);
+        $this->courseName = $course ? $course->fullname : "Course-{$courseId}";
     }
 
     /**
      * Get formatted course identifier for logging
      */
     private function getCourseLogPrefix(): string {
-        return "[Course {$this->courseId} ({$this->courseShortname})]";
+        return "[{$this->courseName}]";
     }
 
     // ==================== ATTENDANCE COLLECTION FUNCTIONALITY ====================
@@ -57,8 +59,15 @@ class ZoomRecollectorData extends BaseRecollector {
 
         try {
             // NEW: Get installation config for daily chunking
-            $config = $DB->get_record('ortattendance', ['course' => $this->courseId],
-                'last_processed_date, start_date, end_date');
+            // Query by installation ID if available (handles multiple instances per course)
+            if ($this->installationId) {
+                $config = $DB->get_record('ortattendance', ['id' => $this->installationId],
+                    'id, last_processed_date, start_date, end_date');
+            } else {
+                // Fallback: query by course (may return first of multiple instances)
+                $config = $DB->get_record('ortattendance', ['course' => $this->courseId],
+                    'id, last_processed_date, start_date, end_date');
+            }
 
             if (!$config) {
                 throw new \Exception("Ortattendance configuration not found for course {$this->courseId}");
@@ -79,10 +88,27 @@ class ZoomRecollectorData extends BaseRecollector {
             $targetDate = $config->last_processed_date + 86400; // Next day (86400 = 24 hours)
         }
 
-        // Check if caught up to today
-        $today = strtotime('today');
-        if ($targetDate >= $today) {
-            mtrace("    {$logPrefix} Already caught up to today!");
+        // FAILSAFE: Stop at whichever comes first: YESTERDAY or END_DATE
+        // Cron runs at 1 AM, so we only process up to yesterday (completed days only)
+        $yesterday = strtotime('yesterday');
+        $endDate = $config->end_date ?? null;
+
+        // Check if we've passed yesterday (trying to process today or future)
+        if ($targetDate > $yesterday) {
+            mtrace("    {$logPrefix} FAILSAFE: Target date (" . date('Y-m-d', $targetDate) . ") is after yesterday (" . date('Y-m-d', $yesterday) . ") - stopping");
+            mtrace("    {$logPrefix} Last processed: " . ($config->last_processed_date ? date('Y-m-d', $config->last_processed_date) : 'none'));
+            return [
+                'students' => [],
+                'teachers' => [],
+                'caught_up' => true,
+                'processed_date' => null
+            ];
+        }
+
+        // Check if we've reached or passed the configured end_date
+        if ($endDate && $targetDate > $endDate) {
+            mtrace("    {$logPrefix} FAILSAFE: Reached end_date (" . date('Y-m-d', $endDate) . ") - stopping");
+            mtrace("    {$logPrefix} Last processed: " . ($config->last_processed_date ? date('Y-m-d', $config->last_processed_date) : 'none'));
             return [
                 'students' => [],
                 'teachers' => [],
@@ -132,7 +158,6 @@ class ZoomRecollectorData extends BaseRecollector {
 
                 // Ensure meetings is always an array
                 if (!is_array($meetings)) {
-                    mtrace("      {$logPrefix} Warning: Query returned non-array for zoom {$zoomId} ({$zoomName})");
                     continue;
                 }
 
@@ -193,18 +218,18 @@ class ZoomRecollectorData extends BaseRecollector {
             return ['students' => [], 'teachers' => []];
         }
 
-        mtrace("  {$logPrefix} getStudentsByMeetingId: Processing " . count($meetingIds) . " meeting detail IDs");
+        LogLevel::debug("getStudentsByMeetingId: Processing " . count($meetingIds) . " meeting detail IDs", $logPrefix);
 
         try {
             if (count($meetingIds) > 1) {
-                mtrace("  {$logPrefix} Using getAttendanceDataByMultipleDetails for " . count($meetingIds) . " meetings");
+                LogLevel::debug("Using getAttendanceDataByMultipleDetails for " . count($meetingIds) . " meetings", $logPrefix);
                 $attendanceData = $this->getAttendanceDataByMultipleDetails($meetingIds);
             } else {
-                mtrace("  {$logPrefix} Using getAttendanceData for single meeting: " . $meetingIds[0]);
+                LogLevel::debug("Using getAttendanceData for single meeting: " . $meetingIds[0], $logPrefix);
                 $attendanceData = $this->getAttendanceData($meetingIds[0]);
             }
 
-            mtrace("  {$logPrefix} Retrieved " . count($attendanceData) . " participant records from database");
+            LogLevel::debug("Retrieved " . count($attendanceData) . " participant records from database", $logPrefix);
 
             // Validate attendanceData is a proper array
             if (!is_array($attendanceData)) {
@@ -213,48 +238,50 @@ class ZoomRecollectorData extends BaseRecollector {
             }
 
             if ($checkCamera) {
-                mtrace("  {$logPrefix} Checking camera status...");
+                LogLevel::debug("Checking camera status...", $logPrefix);
                 $cameraOnUserIds = $this->getUsersWithCameraOn($meetingIds);
-                mtrace("  {$logPrefix} Found " . count($cameraOnUserIds) . " users with camera on");
+                LogLevel::debug("Found " . count($cameraOnUserIds) . " users with camera on", $logPrefix);
             } else {
                 $cameraOnUserIds = [];
             }
 
             $students = [];
             $teachers = [];
+            $unmatchedUsers = [];
 
             foreach ($attendanceData as $participant) {
                 // Defensive checks for participant object properties
                 $name = $participant->name ?? 'Unknown';
-                $email = $participant->user_email ?? 'no-email';
-                $zoomUserId = $participant->zoom_userid ?? null;
 
-                mtrace("    {$logPrefix} Processing participant: name='{$name}', email='{$email}', zoom_userid={$zoomUserId}");
-
-                // Validate user by name and email (prioritize name-based matching)
-                // Pass email as optional filter for disambiguation
-                $userId = $this->validateUserByName($name, $email);
+                // Validate user by name only
+                $userId = $this->validateUserByName($name);
 
                 if (!$userId) {
-                    mtrace("      {$logPrefix} Warning: Could not match user with name '{$name}' and email '{$email}'");
+                    $unmatchedUsers[] = $name;
                     continue;
                 }
 
-                mtrace("      {$logPrefix} Matched to Moodle user ID: {$userId}");
-
                 $participant->userid = $userId; // Update with validated Moodle user ID
+
+                // Get user's actual group in the course
+                $groupId = $this->getUserGroupInCourse($userId);
+                $participant->groupid = $groupId;  // Real group ID from database
+
                 $hasVideo = !$checkCamera || in_array($userId, $cameraOnUserIds);
 
                 if (RoleUtils::isTeacher($userId, $this->courseId)) {
-                    mtrace("      {$logPrefix} User is a teacher");
                     $teachers[] = new TeacherAttendance($participant, $hasVideo);
                 } else {
-                    mtrace("      {$logPrefix} User is a student");
                     $students[] = new StudentAttendance($participant, $hasVideo);
                 }
             }
 
-            mtrace("  {$logPrefix} Final count: " . count($students) . " students, " . count($teachers) . " teachers");
+            // Log unmatched users if any
+            if (!empty($unmatchedUsers)) {
+                mtrace("  {$logPrefix} ⚠ Could not match: '" . implode("', '", $unmatchedUsers) . "'");
+            }
+
+            mtrace("  {$logPrefix} ✓ Matched " . (count($students) + count($teachers)) . " users (" . count($students) . " students, " . count($teachers) . " teachers)");
 
             return ['students' => $students, 'teachers' => $teachers];
         } catch (\Exception $e) {
@@ -265,27 +292,54 @@ class ZoomRecollectorData extends BaseRecollector {
     }
     
     /**
-     * Validate and match Zoom participant to Moodle user by name and optionally by email
-     * Priority: name-based matching first, then email as optional filter
+     * Get user's group ID in the course
+     * If user belongs to multiple groups, returns the first one (earliest joined)
      *
-     * @param string $zoomName The participant's name from Zoom
-     * @param string|null $zoomEmail The participant's email from Zoom (optional)
-     * @return int|null Moodle user ID if found, null otherwise
+     * @param int $userId Moodle user ID
+     * @return int Group ID or 0 if user has no group
      */
-    private function validateUserByName($zoomName, $zoomEmail = null): ?int {
+    private function getUserGroupInCourse($userId): int {
         global $DB;
 
-        $logPrefix = $this->getCourseLogPrefix();
+        try {
+            $sql = "SELECT g.id, g.name
+                    FROM {groups} g
+                    JOIN {groups_members} gm ON gm.groupid = g.id
+                    WHERE gm.userid = :userid
+                      AND g.courseid = :courseid
+                    ORDER BY gm.timeadded ASC
+                    LIMIT 1";
+
+            $group = $DB->get_record_sql($sql, [
+                'userid' => $userId,
+                'courseid' => $this->courseId
+            ]);
+
+            if ($group) {
+                return $group->id;
+            }
+
+            return 0;
+
+        } catch (\Exception $e) {
+            $logPrefix = $this->getCourseLogPrefix();
+            mtrace("  {$logPrefix} Error getting user group for user {$userId}: " . $e->getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * Validate and match Zoom participant to Moodle user by name
+     *
+     * @param string $zoomName The participant's name from Zoom
+     * @return int|null Moodle user ID if found, null otherwise
+     */
+    private function validateUserByName($zoomName): ?int {
+        global $DB;
 
         if (empty($zoomName)) {
-            mtrace("      {$logPrefix} Warning: Empty zoom name, cannot validate user");
             return null;
         }
-
-        // Clean email (handle 'no-email' placeholder)
-        $hasValidEmail = !empty($zoomEmail) && $zoomEmail !== 'no-email';
-
-        mtrace("      {$logPrefix} Searching for user: name='{$zoomName}', email='" . ($hasValidEmail ? $zoomEmail : 'none') . "'");
 
         // Strategy 1: Try full name match (lastname firstname or firstname lastname)
         if (strpos($zoomName, ' ') !== false) {
@@ -296,7 +350,7 @@ class ZoomRecollectorData extends BaseRecollector {
                 $possibleLastName = $nameParts[0];
                 $possibleFirstName = implode(' ', array_slice($nameParts, 1));
 
-                $sql = "SELECT id, email FROM {user}
+                $sql = "SELECT id FROM {user}
                         WHERE LOWER(lastname) = LOWER(:lastname)
                         AND LOWER(firstname) = LOWER(:firstname)
                         AND deleted = 0";
@@ -307,20 +361,8 @@ class ZoomRecollectorData extends BaseRecollector {
                 ]);
 
                 if (!empty($users)) {
-                    // If email is provided, filter by email
-                    if ($hasValidEmail) {
-                        foreach ($users as $user) {
-                            if (strtolower($user->email) === strtolower($zoomEmail)) {
-                                mtrace("      {$logPrefix} ✓ Matched by lastname+firstname+email: user ID {$user->id}");
-                                return $user->id;
-                            }
-                        }
-                    } else {
-                        // No email filter, return first match
-                        $user = reset($users);
-                        mtrace("      {$logPrefix} ✓ Matched by lastname+firstname: user ID {$user->id}");
-                        return $user->id;
-                    }
+                    $user = reset($users);
+                    return $user->id;
                 }
             }
 
@@ -329,7 +371,7 @@ class ZoomRecollectorData extends BaseRecollector {
                 $possibleFirstName = $nameParts[0];
                 $possibleLastName = implode(' ', array_slice($nameParts, 1));
 
-                $sql = "SELECT id, email FROM {user}
+                $sql = "SELECT id FROM {user}
                         WHERE LOWER(firstname) = LOWER(:firstname)
                         AND LOWER(lastname) = LOWER(:lastname)
                         AND deleted = 0";
@@ -340,75 +382,35 @@ class ZoomRecollectorData extends BaseRecollector {
                 ]);
 
                 if (!empty($users)) {
-                    if ($hasValidEmail) {
-                        foreach ($users as $user) {
-                            if (strtolower($user->email) === strtolower($zoomEmail)) {
-                                mtrace("      {$logPrefix} ✓ Matched by firstname+lastname+email: user ID {$user->id}");
-                                return $user->id;
-                            }
-                        }
-                    } else {
-                        $user = reset($users);
-                        mtrace("      {$logPrefix} ✓ Matched by firstname+lastname: user ID {$user->id}");
-                        return $user->id;
-                    }
+                    $user = reset($users);
+                    return $user->id;
                 }
             }
         }
 
         // Strategy 2: Try lastname-only match
-        $sql = "SELECT id, email FROM {user}
+        $sql = "SELECT id FROM {user}
                 WHERE LOWER(lastname) = LOWER(:name)
                 AND deleted = 0";
         $users = $DB->get_records_sql($sql, ['name' => $zoomName]);
 
         if (!empty($users)) {
-            if ($hasValidEmail) {
-                foreach ($users as $user) {
-                    if (strtolower($user->email) === strtolower($zoomEmail)) {
-                        mtrace("      {$logPrefix} ✓ Matched by lastname+email: user ID {$user->id}");
-                        return $user->id;
-                    }
-                }
-            } else {
-                $user = reset($users);
-                mtrace("      {$logPrefix} ✓ Matched by lastname: user ID {$user->id}");
-                return $user->id;
-            }
+            $user = reset($users);
+            return $user->id;
         }
 
         // Strategy 3: Try firstname-only match
-        $sql = "SELECT id, email FROM {user}
+        $sql = "SELECT id FROM {user}
                 WHERE LOWER(firstname) = LOWER(:name)
                 AND deleted = 0";
         $users = $DB->get_records_sql($sql, ['name' => $zoomName]);
 
         if (!empty($users)) {
-            if ($hasValidEmail) {
-                foreach ($users as $user) {
-                    if (strtolower($user->email) === strtolower($zoomEmail)) {
-                        mtrace("      {$logPrefix} ✓ Matched by firstname+email: user ID {$user->id}");
-                        return $user->id;
-                    }
-                }
-            } else {
-                $user = reset($users);
-                mtrace("      {$logPrefix} ✓ Matched by firstname: user ID {$user->id}");
-                return $user->id;
-            }
-        }
-
-        // Strategy 4: If email is provided, try email-only match
-        if ($hasValidEmail) {
-            $user = $DB->get_record('user', ['email' => $zoomEmail, 'deleted' => 0]);
-            if ($user && !empty($user->id)) {
-                mtrace("      {$logPrefix} ✓ Matched by email only: user ID {$user->id}");
-                return $user->id;
-            }
+            $user = reset($users);
+            return $user->id;
         }
 
         // No match found
-        mtrace("      {$logPrefix} ✗ No match found for '{$zoomName}'");
         return null;
     }
 
@@ -457,7 +459,6 @@ class ZoomRecollectorData extends BaseRecollector {
 
             // Ensure we always return an array (DB can return null/false on error)
             if (!is_array($results)) {
-                mtrace("    {$logPrefix} Warning: Query returned non-array result for zoomid {$recollectorId}");
                 return [];
             }
 
@@ -501,7 +502,7 @@ class ZoomRecollectorData extends BaseRecollector {
 
     try {
         // Get tolerance from config
-        $config = $DB->get_record('ortattendance', ['course' => $this->courseId], 'late_tolerance');
+        $config = $DB->get_record('ortattendance', ['course' => $this->courseId], 'id, late_tolerance');
 
         if (!$config) {
             mtrace("  {$logPrefix} WARNING: No ortattendance config found for course {$this->courseId}, using default tolerance");
@@ -514,19 +515,19 @@ class ZoomRecollectorData extends BaseRecollector {
             $lateTolerance = 1000000000; // No tolerance means accept any join time
         }
 
-        // Query with LEFT JOIN for groups (includes non-grouped users)
-        // This allows us to capture all participants regardless of group membership
+        // Minimal query - only essential fields, excludes NULL/empty names
+        // User matching happens via validateUserByName() in PHP, not SQL
+        // Using name as first column is safe here since we GROUP BY name and filter by single detailsid
+        // so each name appears only once in results
         $sql = "SELECT
-                    zmp.userid as zoom_userid,
                     zmp.name,
-                    zmp.user_email,
                     MIN(zmp.join_time) AS join_time,
                     MAX(zmp.leave_time) AS leave_time,
-                    gm.groupid,
+                    SUM(zmp.duration) AS duration,
+                    zmp.detailsid,
                     zmd.meeting_id,
                     zmd.start_time,
                     zmd.end_time,
-                    SUM(zmp.duration) AS duration,
                     (SUM(zmp.duration) * 100.0 / NULLIF(zmd.end_time - zmd.start_time, 0)) AS attendance_percentage,
                     CASE
                         WHEN MIN(zmp.join_time) > zmd.start_time + (:minutes_of_tolerance * 60)
@@ -535,12 +536,10 @@ class ZoomRecollectorData extends BaseRecollector {
                     END AS is_late
                 FROM {zoom_meeting_participants} zmp
                 JOIN {zoom_meeting_details} zmd ON zmp.detailsid = zmd.id
-                JOIN {zoom} z ON zmd.zoomid = z.id
-                LEFT JOIN {groups_members} gm ON zmp.userid = gm.userid
-                LEFT JOIN {groups} g ON gm.groupid = g.id AND z.course = g.courseid
                 WHERE zmp.detailsid = :details_id
-                GROUP BY zmp.userid, zmp.name, zmp.user_email,
-                         zmd.meeting_id, zmd.start_time, zmd.end_time, gm.groupid";
+                  AND zmp.name IS NOT NULL
+                  AND zmp.name != ''
+                GROUP BY zmp.name, zmp.detailsid, zmd.meeting_id, zmd.start_time, zmd.end_time";
 
         $results = $DB->get_records_sql($sql, [
             'details_id' => $detailId,
@@ -549,7 +548,6 @@ class ZoomRecollectorData extends BaseRecollector {
 
         // Ensure we always return an array (DB can return null/false on error)
         if (!is_array($results)) {
-            mtrace("  {$logPrefix} Warning: Query returned non-array result for detailId $detailId");
             $results = [];
         }
 
@@ -569,7 +567,7 @@ class ZoomRecollectorData extends BaseRecollector {
     LogLevel::debug("Getting attendance data for multiple details: " . count($detailsIds), $logPrefix);
 
     // Get tolerance from config
-    $config = $DB->get_record('ortattendance', ['course' => $this->courseId], 'late_tolerance');
+    $config = $DB->get_record('ortattendance', ['course' => $this->courseId], 'id, late_tolerance');
 
     if (!$config) {
         mtrace("  {$logPrefix} WARNING: No ortattendance config found for course {$this->courseId}, using default tolerance");
@@ -585,19 +583,19 @@ class ZoomRecollectorData extends BaseRecollector {
     // Use get_in_or_equal for safe IN clause parameter binding
     list($inSql, $inParams) = $DB->get_in_or_equal($detailsIds, SQL_PARAMS_NAMED, 'detailsid');
 
-    // Query with LEFT JOIN for groups (includes non-grouped users)
-    // This allows us to capture all participants regardless of group membership
+    // Minimal query - only essential fields, excludes NULL/empty names
+    // User matching happens via validateUserByName() in PHP, not SQL
+    // Using CONCAT to create unique key from name and detailsid to avoid duplicate warnings
     $sql = "SELECT
-                zmp.userid as zoom_userid,
+                CONCAT(zmp.name, '_', zmp.detailsid) as unique_key,
                 zmp.name,
-                zmp.user_email,
-                gm.groupid,
                 zmd.meeting_id,
                 zmd.start_time,
                 zmd.end_time,
                 MIN(zmp.join_time) as join_time,
                 MAX(zmp.leave_time) as leave_time,
                 SUM(zmp.duration) as duration,
+                zmp.detailsid,
                 (SUM(zmp.duration) * 100.0 / NULLIF(zmd.end_time - zmd.start_time, 0)) AS attendance_percentage,
                 CASE
                     WHEN MIN(zmp.join_time) > zmd.start_time + (:minutes_of_tolerance * 60)
@@ -606,12 +604,10 @@ class ZoomRecollectorData extends BaseRecollector {
                 END AS is_late
             FROM {zoom_meeting_participants} zmp
             JOIN {zoom_meeting_details} zmd ON zmp.detailsid = zmd.id
-            JOIN {zoom} z ON zmd.zoomid = z.id
-            LEFT JOIN {groups_members} gm ON zmp.userid = gm.userid
-            LEFT JOIN {groups} g ON gm.groupid = g.id AND z.course = g.courseid
             WHERE zmp.detailsid $inSql
-            GROUP BY zmp.userid, zmp.name, zmp.user_email, zmd.meeting_id,
-                     zmd.start_time, zmd.end_time, gm.groupid";
+              AND zmp.name IS NOT NULL
+              AND zmp.name != ''
+            GROUP BY zmp.name, zmp.detailsid, zmd.meeting_id, zmd.start_time, zmd.end_time";
 
     // Merge parameters
     $params = array_merge(['minutes_of_tolerance' => $lateTolerance], $inParams);
@@ -619,7 +615,6 @@ class ZoomRecollectorData extends BaseRecollector {
 
     // Ensure we always return an array (DB can return null/false on error)
     if (!is_array($results)) {
-        mtrace("  {$logPrefix} Warning: Query returned non-array result for multiple details");
         $results = [];
     }
 
@@ -648,8 +643,7 @@ class ZoomRecollectorData extends BaseRecollector {
         // $records = $DB->get_records_sql($sql, $params);
         // return array_keys($records);
 
-        mtrace("  {$logPrefix} WARNING: Camera checking is disabled (zoom_meeting_participants.has_video field does not exist)");
-        mtrace("  {$logPrefix} WORKAROUND: Treating all participants as having camera ON");
+        LogLevel::debug("Camera checking is disabled (zoom_meeting_participants.has_video field does not exist) - treating all participants as having camera ON", $logPrefix);
 
         // Get all user IDs for participants in these meetings
         list($inSql, $params) = $DB->get_in_or_equal($meetingIds, SQL_PARAMS_NAMED);
@@ -662,7 +656,6 @@ class ZoomRecollectorData extends BaseRecollector {
 
         // Ensure records is always an array
         if (!is_array($records)) {
-            mtrace("  {$logPrefix} Warning: Camera check query returned non-array");
             return [];
         }
 
@@ -685,7 +678,6 @@ class ZoomRecollectorData extends BaseRecollector {
 
         // Ensure pluginModules is always an array
         if (!is_array($pluginModules)) {
-            mtrace("  {$logPrefix} Warning: Query for module instances returned non-array");
             return [];
         }
 

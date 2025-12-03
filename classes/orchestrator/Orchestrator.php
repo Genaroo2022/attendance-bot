@@ -154,11 +154,11 @@ class Orchestrator {
         switch ($recollectorType) {
             case "zoom":
                 LogLevel::debug("Creating ZoomRecollectorData");
-                return new ZoomRecollectorData($this->courseId, $this->checkCamera);
+                return new ZoomRecollectorData($this->courseId, $this->checkCamera, $this->installationId);
 
             default:
                 LogLevel::warning("Unknown recollector type '{$recollectorType}', defaulting to ZoomRecollectorData");
-                return new ZoomRecollectorData($this->courseId, $this->checkCamera);
+                return new ZoomRecollectorData($this->courseId, $this->checkCamera, $this->installationId);
         }
     }
 

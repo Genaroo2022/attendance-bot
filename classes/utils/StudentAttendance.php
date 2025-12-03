@@ -6,7 +6,6 @@ defined('MOODLE_INTERNAL') || die();
 class StudentAttendance {
 
     public $userId;
-    public $email;
     private $name;
     private $groupId;
     public $duration;
@@ -17,7 +16,6 @@ class StudentAttendance {
 
     public function __construct($participant, $hasVideo) {
         $this->userId = $participant->userid;
-        $this->email = $participant->user_email;
         $this->name = $participant->name ?? 'Unknown';
         $this->groupId = $participant->groupid ?? 0;  // Always use 0 for no group, never null
         $this->duration = $participant->duration ?? 0;
@@ -25,10 +23,6 @@ class StudentAttendance {
         $this->joinTime = $participant->join_time ?? 0;
         $this->leaveTime = $participant->leave_time ?? 0;
         $this->meetingId = $participant->meeting_id ?? '';
-    }
-
-    public function getEmail() {
-        return $this->email;
     }
     
     public function getUserId() {

@@ -23,8 +23,7 @@
         <FIELD NAME="min_percentage" TYPE="int" LENGTH="3" NOTNULL="true" DEFAULT="80" SEQUENCE="false" COMMENT="Min attendance %"/>
         <FIELD NAME="late_tolerance" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="10" SEQUENCE="false" COMMENT="Late tolerance minutes"/>
         <FIELD NAME="camera_required" TYPE="int" LENGTH="1" NOTNULL="true" DEFAULT="0" SEQUENCE="false" COMMENT="Camera must be on"/>
-        <FIELD NAME="use_email_matching" TYPE="int" LENGTH="1" NOTNULL="true" DEFAULT="0" SEQUENCE="false" COMMENT="Match users by email instead of name"/>
-        
+
         <!-- Recording Backup Configuration -->
         <FIELD NAME="backup_recordings" TYPE="int" LENGTH="1" NOTNULL="true" DEFAULT="0" SEQUENCE="false" COMMENT="Enable recording backup"/>
         <FIELD NAME="delete_from_source" TYPE="int" LENGTH="1" NOTNULL="true" DEFAULT="0" SEQUENCE="false" COMMENT="Delete from Zoom after backup"/>
@@ -39,7 +38,7 @@
         <KEY NAME="fk_course" TYPE="foreign" FIELDS="course" REFTABLE="course" REFFIELDS="id"/>
       </KEYS>
       <INDEXES>
-        <INDEX NAME="idx_course" UNIQUE="false" FIELDS="course"/>
+        <INDEX NAME="idx_course_unique" UNIQUE="true" FIELDS="course" COMMENT="Ensure only one ortattendance instance per course"/>
       </INDEXES>
     </TABLE>
     

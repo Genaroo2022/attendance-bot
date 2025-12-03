@@ -258,7 +258,7 @@ class AttendancePersistence extends BasePersistence {
         }
 
         // Build description
-        $description = "sesion automatica";
+        $description = "";
         if (!empty($meeting->topic)) {
             $description = $meeting->topic . " - " . $description;
         }
@@ -356,9 +356,9 @@ class AttendancePersistence extends BasePersistence {
 
             $statuses = $this->getStatuses($attendanceId);
 
-            // Get config including use_email_matching setting
+            // Get configuration settings
             $config = $DB->get_record('ortattendance', ['course' => $this->courseId],
-                'min_percentage, late_tolerance, camera_required, use_email_matching');
+                'id, min_percentage, late_tolerance, camera_required');
 
             if (!$config) {
                 mtrace("      ERROR: No ortattendance configuration found for course {$this->courseId}");
@@ -369,16 +369,14 @@ class AttendancePersistence extends BasePersistence {
             return;
         }
 
-        $useEmailMatching = !empty($config->use_email_matching);
-
-        // Enrolled users by email (always populate for absent marking)
-        $enrolledByEmail = [];
+        // Get enrolled users for absent marking
+        $enrolledUserIds = [];
         $context = \context_course::instance($this->courseId);
 
         // FIX: Only get users from the session's group (if session has a group)
         if (!empty($session->groupid)) {
             // Get group members only
-            $groupMembers = \groups_get_members($session->groupid, 'u.id, u.email');
+            $groupMembers = \groups_get_members($session->groupid, 'u.id');
 
             // Ensure groupMembers is always an array
             if (!is_array($groupMembers)) {
@@ -387,12 +385,12 @@ class AttendancePersistence extends BasePersistence {
             }
 
             foreach ($groupMembers as $user) {
-                $enrolledByEmail[strtolower($user->email)] = $user->id;
+                $enrolledUserIds[$user->id] = true;
             }
-            mtrace("      Loaded " . count($enrolledByEmail) . " users from group {$session->groupid}");
+            mtrace("      Loaded " . count($enrolledUserIds) . " users from group {$session->groupid}");
         } else {
             // Session has no group - get all enrolled users
-            $enrolledUsers = \get_enrolled_users($context, '', 0, 'u.id, u.email');
+            $enrolledUsers = \get_enrolled_users($context, '', 0, 'u.id');
 
             // Ensure enrolledUsers is always an array
             if (!is_array($enrolledUsers)) {
@@ -401,9 +399,9 @@ class AttendancePersistence extends BasePersistence {
             }
 
             foreach ($enrolledUsers as $user) {
-                $enrolledByEmail[strtolower($user->email)] = $user->id;
+                $enrolledUserIds[$user->id] = true;
             }
-            mtrace("      Loaded " . count($enrolledByEmail) . " enrolled users (no group)");
+            mtrace("      Loaded " . count($enrolledUserIds) . " enrolled users (no group)");
         }
 
         $allParticipants = array_merge($students, $teachers);
@@ -412,39 +410,11 @@ class AttendancePersistence extends BasePersistence {
 
         foreach ($allParticipants as $participant) {
             try {
-                // Determine user ID and enrollment status
-                $isEnrolled = true;
-                $userId = null;
-
-                if ($useEmailMatching) {
-                    $email = $participant->getEmail();
-                    if (empty($email)) {
-                        mtrace("      Warning: Participant has no email - skipping");
-                        continue;
-                    }
-                    $email = strtolower($email);
-
-                    if (!isset($enrolledByEmail[$email])) {
-                        // User not enrolled - we'll still create a record with "no registrado"
-                        mtrace("      Warning: User with email '{$email}' not enrolled in course - marking as 'no registrado'");
-                        $isEnrolled = false;
-
-                        // Try to find user in Moodle by email to get user ID
-                        $moodleUser = $DB->get_record('user', ['email' => $email], 'id');
-                        if (!$moodleUser || empty($moodleUser->id)) {
-                            mtrace("      Warning: User with email '{$email}' not found in Moodle - skipping");
-                            continue;
-                        }
-                        $userId = $moodleUser->id;
-                    } else {
-                        $userId = $enrolledByEmail[$email];
-                    }
-                } else {
-                    $userId = $participant->getUserId();
-                    if (empty($userId)) {
-                        mtrace("      Warning: No user ID for participant '{$participant->getName()}'");
-                        continue;
-                    }
+                // Get user ID from participant (already validated by name in recollector)
+                $userId = $participant->getUserId();
+                if (empty($userId)) {
+                    mtrace("      Warning: No user ID for participant - skipping");
+                    continue;
                 }
 
                 // Double check we have a valid user ID
@@ -486,14 +456,10 @@ class AttendancePersistence extends BasePersistence {
                     }
                 }
 
-                // Build complete remark based on enrollment status
-                if (!$isEnrolled) {
-                    $baseRemark = 'no registrado' . $timePart;
-                } else {
-                    $baseRemark = 'Ort Attendance Bot' . $timePart;
-                    if (!empty($irregularReason)) {
-                        $baseRemark .= " - {$irregularReason}";
-                    }
+                // Build complete remark
+                $baseRemark = 'Ort Attendance' . $timePart;
+                if (!empty($irregularReason)) {
+                    $baseRemark .= " - {$irregularReason}";
                 }
 
                 if ($existingLog) {
@@ -527,8 +493,17 @@ class AttendancePersistence extends BasePersistence {
         mtrace("      Recorded {$recorded} attendances" . ($failed > 0 ? ", {$failed} failed" : ""));
 
         // Mark absent students (always run to ensure all enrolled users have records)
-        if (!empty($enrolledByEmail)) {
-            $this->markAbsentStudents($sessionId, $enrolledByEmail, $statuses['absent']);
+        if (!empty($enrolledUserIds)) {
+            $this->markAbsentStudents($sessionId, $enrolledUserIds, $statuses['absent']);
+        }
+
+        // Mark attendance as taken (update session with lasttaken timestamp)
+        try {
+            $DB->set_field('attendance_sessions', 'lasttaken', time(), ['id' => $sessionId]);
+            $DB->set_field('attendance_sessions', 'lasttakenby', 2, ['id' => $sessionId]);
+            mtrace("      ✓ Marked attendance as taken for session {$sessionId}");
+        } catch (\Exception $e) {
+            mtrace("      Warning: Failed to mark session as taken: " . $e->getMessage());
         }
     }
 
@@ -614,7 +589,7 @@ class AttendancePersistence extends BasePersistence {
         return $statuses['present'];
     }
 
-    private function markAbsentStudents($sessionId, $enrolledByEmail, $presentId) {
+    private function markAbsentStudents($sessionId, $enrolledUserIds, $presentId) {
         global $DB;
 
         try {
@@ -643,7 +618,7 @@ class AttendancePersistence extends BasePersistence {
             $markedAbsent = 0;
             $failed = 0;
 
-            foreach ($enrolledByEmail as $email => $userId) {
+            foreach ($enrolledUserIds as $userId => $ignored) {
                 try {
                     if (!$DB->record_exists('attendance_log', ['sessionid' => $sessionId, 'studentid' => $userId])) {
                         $log = new \stdClass();
@@ -653,7 +628,7 @@ class AttendancePersistence extends BasePersistence {
                         $log->statusset = '';
                         $log->timetaken = time();
                         $log->takenby = 2;
-                        $log->remarks = 'Ort Attendance Bot';
+                        $log->remarks = 'Ort Attendance';
 
                         $DB->insert_record('attendance_log', $log);
                         $markedAbsent++;
